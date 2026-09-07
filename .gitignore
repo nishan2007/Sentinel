@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+sentinel-controller/smartthings-oauth-settings.json
+
+# Runtime databases, recordings, snapshots, OAuth state and backups
+/data/
+/sentinel-controller/data/*
+!/sentinel-controller/data/.gitkeep
+/sentinel-controller/data.zip
+*.db
+*.db-*
+*.db.backup*
+*.sqlite*
+*.log
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# macOS metadata
+.DS_Store

@@ -1,0 +1,11 @@
+{
+  "appName": "sentinel-local-controller",
+  "displayName": "Sentinel",
+  "description": "Local Sentinel smart-home dashboard controller",
+  "appType": "API_ONLY",
+  "classifications": [
+    "CONNECTED_SERVICE"
+  ],
+  "singleInstance": true,
+  "apiOnly": {}
+}

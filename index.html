@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Sentinel guest WiFi captive portal">
+    <title>Sentinel Guest WiFi</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="portal-card" aria-labelledby="portal-title">
+        <div class="logo-wrap" aria-label="Sentinel">
+          <span class="sentinel-logo">Sentinel</span>
+        </div>
+
+        <header class="portal-header">
+          <p id="timeGreeting" class="time-greeting">Welcome in</p>
+          <h1 id="portal-title">Settle in with Sentinel</h1>
+          <p id="welcomeCopy">A few details, a quick hello, and you are connected to our complimentary guest WiFi.</p>
+        </header>
+
+        <div id="statusMessage" class="status-message" role="status" aria-live="polite" hidden></div>
+
+        <form id="wifiForm" novalidate>
+          <div class="field-group">
+            <label for="fullName">Full name</label>
+            <input id="fullName" name="full_name" type="text" autocomplete="name" placeholder="Alex Morgan">
+          </div>
+
+          <div class="field-group">
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" autocomplete="email" inputmode="email" placeholder="alex@example.com">
+          </div>
+
+          <div class="field-group">
+            <label for="phone">Phone number</label>
+            <input id="phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="(555) 123-4567">
+          </div>
+
+          <label class="terms-row" for="acceptedTerms">
+            <input id="acceptedTerms" name="accepted_terms" type="checkbox">
+            <span>I agree to the WiFi Terms of Use</span>
+          </label>
+
+          <input id="mac" name="mac" type="hidden">
+          <input id="ip" name="ip" type="hidden">
+          <input id="locationId" name="location_id" type="hidden">
+          <input id="nasid" name="nasid" type="hidden">
+          <input id="sessionId" name="session_id" type="hidden">
+          <input id="redirectUrl" name="redirect_url" type="hidden">
+
+          <button id="submitButton" class="connect-button" type="submit">
+            <span class="button-text">Connect to Sentinel WiFi</span>
+            <span class="button-spinner" aria-hidden="true"></span>
+          </button>
+        </form>
+
+        <footer class="portal-footer">
+          <span>Powered by</span>
+          <strong>Sentinel</strong>
+        </footer>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sentinel Cameras</title>
+  <link rel="icon" href="/brand/sentinel-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/cameras.css?v=20260722-recording-timeline">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
+  <script src="/static/cameras.js?v=20260722-recording-timeline" defer></script>
+</head>
+<body>
+  <header class="nvr-header">
+    <a class="brand" href="/dashboard"><img src="/brand/sentinel-mark.svg" alt=""><span>Sentinel</span></a>
+    <div><p>Local surveillance</p><h1>Cameras &amp; NVR</h1></div>
+    <nav><a href="/dashboard">Dashboard</a><button id="storageButton">Storage</button><button id="addButton" class="primary">Add camera</button></nav>
+  </header>
+  <main>
+    <section class="health-strip" aria-live="polite">
+      <div><span>Recorder</span><strong id="recorderStatus">Checking…</strong></div>
+      <div><span>Storage</span><strong id="storageStatus">—</strong></div>
+      <div><span>Cameras</span><strong id="cameraCount">0</strong></div>
+    </section>
+    <div id="banner" class="banner" hidden></div>
+    <section>
+      <div class="section-heading"><div><p class="eyebrow">Live</p><h2 id="liveViewTitle">Camera grid</h2></div><div class="view-controls" role="group" aria-label="Camera layout"><button id="cardViewButton" type="button" aria-pressed="true">Cards</button><button id="splitViewButton" type="button" aria-pressed="false">4-up</button><button id="refreshButton" type="button">Refresh</button></div></div>
+      <div id="cameraGrid" class="camera-grid"></div>
+      <div id="emptyState" class="empty-state" hidden><h3>No cameras yet</h3><p>Discover an ONVIF camera or add its RTSP stream manually.</p><button id="emptyAddButton" class="primary">Add camera</button></div>
+    </section>
+    <section id="playbackSection" class="playback-section" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Review</p><h2 id="playbackTitle">Timeline</h2><div id="playbackLiveStatus" class="detail-live-clock" data-live-label="LIVE NOW" hidden></div></div><button id="jumpLiveButton">Jump to live</button></div>
+      <div class="player-shell"><video id="player" class="playback-active" controls playsinline muted preload="auto"></video><video id="playerBuffer" controls playsinline muted preload="auto" aria-hidden="true"></video><div id="playerMessage">Select a recording from the timeline.</div></div>
+      <div class="timeline-toolbar"><label>Date <input id="timelineDate" type="date"></label><span id="timelineSummary"></span></div>
+      <div id="timeline" class="timeline" role="region" aria-label="Recording timeline"></div>
+    </section>
+  </main>
+
+  <dialog id="cameraDialog">
+    <form id="cameraForm">
+      <header><div><p class="eyebrow">ONVIF / RTSP</p><h2>Add IP camera</h2></div><button type="button" class="close" data-close="cameraDialog">×</button></header>
+      <div class="discover-row"><button id="discoverButton" type="button">Discover cameras</button><select id="discoveredCameras"><option value="">Discovered cameras appear here</option></select></div>
+      <label>VPN/VLAN subnet <small>Optional. Sentinel automatically scans private subnets found in this computer's routing table.</small><input id="discoverySubnet" placeholder="Example: 10.1.1.0/24"></label>
+      <div class="form-grid">
+        <label>Name<input id="cameraName" required maxlength="120" placeholder="Driveway"></label>
+        <label>Host or IP<input id="cameraHost" required placeholder="192.168.1.50"></label>
+        <label>Model<input id="cameraModel" placeholder="Optional"></label>
+        <label>ONVIF port<input id="onvifPort" type="number" value="80" min="1" max="65535"></label>
+        <label>Username<input id="cameraUsername" autocomplete="username"></label>
+        <label>Password<input id="cameraPassword" type="password" autocomplete="current-password"></label>
+      </div>
+      <button id="loadProfilesButton" type="button">Load ONVIF stream profiles</button>
+      <div class="form-grid streams">
+        <label>Main stream<select id="mainProfile"><option value="">Enter RTSP URL manually</option></select><input id="mainStream" required placeholder="rtsp://192.168.1.50/stream1"></label>
+        <label>Sub-stream<select id="subProfile"><option value="">Use main stream</option></select><input id="subStream" placeholder="rtsp://192.168.1.50/stream2"></label>
+      </div>
+      <div class="checks"><label><input id="recordingEnabled" type="checkbox" checked> Continuous video and audio recording</label></div>
+      <footer><button type="button" data-close="cameraDialog">Cancel</button><button class="primary" type="submit">Save camera</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="storageDialog">
+    <form id="storageForm">
+      <header><div><p class="eyebrow">Recorder</p><h2>Storage settings</h2></div><button type="button" class="close" data-close="storageDialog">×</button></header>
+      <label>Recording folder<input id="recordingRoot" required placeholder="data/recordings"></label>
+      <label>Capacity in GB <small>Leave blank to use the volume until the safety reserve.</small><input id="capacityGb" type="number" min="1" step="1"></label>
+      <label>Free-space reserve in GB<input id="reserveGb" type="number" min="1" value="10" required></label>
+      <footer><button type="button" data-close="storageDialog">Cancel</button><button class="primary" type="submit">Save storage</button></footer>
+    </form>
+  </dialog>
+</body>
+</html>

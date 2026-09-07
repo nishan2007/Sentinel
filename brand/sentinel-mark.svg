@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Sentinel mark</title>
+  <desc id="desc">A protected smart home with signal arcs inside a rounded square.</desc>
+  <defs>
+    <linearGradient id="sentinelMarkBg" x1="12" y1="12" x2="116" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#155eef"/>
+      <stop offset="0.52" stop-color="#20b5e8"/>
+      <stop offset="1" stop-color="#18d8bd"/>
+    </linearGradient>
+    <linearGradient id="sentinelMarkShade" x1="29" y1="30" x2="96" y2="103" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dff8ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="#121a24"/>
+  <path d="M24 46c0-12.2 9.8-22 22-22h36c12.2 0 22 9.8 22 22v36c0 12.2-9.8 22-22 22H46c-12.2 0-22-9.8-22-22V46Z" fill="url(#sentinelMarkBg)"/>
+  <path d="M64 33 95 50v25c0 18.4-13.1 31.8-31 38-17.9-6.2-31-19.6-31-38V50l31-17Z" fill="#0e1722" opacity="0.2"/>
+  <path d="M64 28 97 47v27c0 20.1-13.8 35.5-33 42-19.2-6.5-33-21.9-33-42V47l33-19Z" fill="url(#sentinelMarkShade)"/>
+  <path d="M44 74V58l20-13 20 13v16" fill="none" stroke="#132235" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M51 74h26" fill="none" stroke="#132235" stroke-width="7" stroke-linecap="round"/>
+  <path d="M54 89c5.8 4.7 14.2 4.7 20 0" fill="none" stroke="#155eef" stroke-width="7" stroke-linecap="round"/>
+  <path d="M47 82c9.6 8.8 24.4 8.8 34 0" fill="none" stroke="#20b5e8" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="64" cy="68" r="6" fill="#18d8bd"/>
+</svg>
+

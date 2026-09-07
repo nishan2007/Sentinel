@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+meross-iot
+aiosqlite
+ring-doorbell
+yalexs
+onvif-zeep
+WSDiscovery

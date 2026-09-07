@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sentinel Dashboard</title>
+    <link rel="icon" href="/brand/sentinel-mark.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/brand/png/sentinel-app-icon-1024.png">
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260708-camera-feed-repair">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Dashboard controls">
+        <header class="brand-block">
+          <div class="brand-lockup">
+            <img class="brand-mark" src="/brand/sentinel-mark.svg" alt="" aria-hidden="true">
+            <div class="brand-copy">
+              <h1>Sentinel</h1>
+              <p>Smart-home control</p>
+            </div>
+          </div>
+          <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+            <span aria-hidden="true">‹</span>
+          </button>
+        </header>
+
+        <nav class="nav-list" aria-label="Device filters">
+          <a class="nav-button camera-nav-link" href="/cameras"><span class="nav-label">Cameras / NVR</span><span>›</span></a>
+          <button class="nav-button is-active" type="button" data-filter="all"><span class="nav-label">All devices</span> <span id="allCount">0</span></button>
+          <button class="nav-button" type="button" data-filter="on"><span class="nav-label">On</span> <span id="onCount">0</span></button>
+          <button class="nav-button" type="button" data-filter="off"><span class="nav-label">Off</span> <span id="offCount">0</span></button>
+          <button class="nav-button" type="button" data-filter="errors"><span class="nav-label">Needs attention</span> <span id="errorCount">0</span></button>
+          <button class="nav-button" type="button" data-filter="local"><span class="nav-label">Local devices</span> <span id="localCount">0</span></button>
+          <button class="nav-button" type="button" data-filter="cloud"><span class="nav-label">Cloud devices</span> <span id="cloudCount">0</span></button>
+        </nav>
+
+        <section class="scene-panel" aria-labelledby="scene-title">
+          <h2 id="scene-title">Scenes</h2>
+          <div class="scene-list">
+            <button class="scene-button" type="button" data-scene="lights-off">Turn off all lights</button>
+            <button class="scene-button" type="button" data-scene="night">Night mode</button>
+            <button class="scene-button" type="button" data-scene="away">Away mode</button>
+          </div>
+        </section>
+
+        <section class="setup-panel" aria-labelledby="setup-title">
+          <h2 id="setup-title">Sentinel setup</h2>
+          <p>Import native sources first, then use SmartThings only for devices that do not have a better direct source.</p>
+          <button id="openImportButton" class="secondary-button" type="button">Import devices</button>
+          <div class="reliability-panel" aria-live="polite">
+            <span class="reliability-label">Reliability</span>
+            <strong id="reliabilityStatus">Checking</strong>
+            <span id="reliabilityDetail">Cloud refresh and credential health are loading.</span>
+            <div class="reliability-actions">
+              <button id="runCloudRefreshButton" class="service-button" type="button">Refresh cloud</button>
+              <button id="repairDuplicatesButton" class="service-button" type="button">Repair duplicates</button>
+            </div>
+          </div>
+          <a class="docs-link" href="/docs">API docs</a>
+        </section>
+      </aside>
+
+      <main class="main-panel">
+        <section class="toolbar" aria-label="Dashboard toolbar">
+          <div>
+            <p class="eyebrow">Local dashboard</p>
+            <h2>Smart devices</h2>
+            <p class="toolbar-refresh">Last refresh <span id="lastRefresh">--</span></p>
+          </div>
+          <div class="toolbar-actions">
+            <label class="search-field" for="searchInput">
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Search devices">
+            </label>
+            <label class="admin-detail-toggle">
+              <input id="showDeviceDetailsToggle" type="checkbox">
+              <span>View device details</span>
+            </label>
+            <label class="admin-detail-toggle">
+              <input id="showCameraLiveToggle" type="checkbox">
+              <span>Live camera tiles</span>
+            </label>
+            <button id="themeToggle" class="icon-button theme-toggle" type="button" aria-label="Use dark mode" title="Use dark mode">
+              <span aria-hidden="true">☾</span>
+            </button>
+            <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh states" title="Refresh states">↻</button>
+          </div>
+        </section>
+
+        <div id="statusBanner" class="status-banner" role="status" aria-live="polite" hidden></div>
+
+        <section class="summary-grid" aria-label="Device summary">
+          <div class="metric">
+            <span class="metric-label">Online</span>
+            <strong id="onlineTotal">0</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Checking</span>
+            <strong id="checkingTotal">0</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Offline/Error</span>
+            <strong id="offlineErrorTotal">0</strong>
+          </div>
+        </section>
+
+        <section id="deviceGrid" class="device-grid" aria-label="Devices"></section>
+
+        <section id="emptyState" class="empty-state" hidden>
+          <h3>No devices found</h3>
+          <p>Import from Meross, SmartThings, Ring, or Yale, or clear the search and refresh.</p>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="importDialog" class="modal">
+      <form id="importForm" method="dialog">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">Setup</p>
+            <h2>Import Meross devices</h2>
+          </div>
+          <button id="closeImportButton" class="icon-button" type="button" aria-label="Close import dialog">×</button>
+        </header>
+
+        <div class="import-provider-tabs" role="tablist" aria-label="Import source">
+          <button class="import-provider-button is-active" type="button" data-import-provider="meross">Meross</button>
+          <button class="import-provider-button" type="button" data-import-provider="smartthings">SmartThings</button>
+          <button class="import-provider-button" type="button" data-import-provider="nest">Nest</button>
+          <button class="import-provider-button" type="button" data-import-provider="ring">Ring</button>
+          <button class="import-provider-button" type="button" data-import-provider="yale">Yale</button>
+          <button class="import-provider-button" type="button" data-import-provider="cudy">Cudy</button>
+          <button class="import-provider-button" type="button" data-import-provider="printers">Printers</button>
+        </div>
+
+        <div class="import-provider-panel" data-import-panel="meross">
+          <div class="form-grid">
+            <label>
+              <span>Email</span>
+              <input id="merossEmail" name="email" type="email" autocomplete="username" required>
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="merossPassword" name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <label>
+              <span>MFA code</span>
+              <input id="merossMfa" name="mfa_code" type="text" inputmode="numeric" placeholder="Optional">
+            </label>
+          </div>
+
+          <footer class="modal-actions">
+            <button id="runImportButton" class="primary-button" type="submit">Import</button>
+          </footer>
+        </div>
+      </form>
+
+      <form id="smartThingsImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="smartthings" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">SmartThings</p>
+            <h2>Add SmartThings devices</h2>
+          </div>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>OAuth client ID</span>
+            <input id="smartThingsClientId" name="client_id" type="text" autocomplete="off" placeholder="Required for authorization code or refresh token">
+          </label>
+          <label>
+            <span>OAuth client secret</span>
+            <input id="smartThingsClientSecret" name="client_secret" type="password" autocomplete="off" placeholder="Required for OAuth refresh">
+          </label>
+          <div class="oauth-action-row">
+            <button id="startSmartThingsOAuthButton" class="primary-button smartthings-signin-button" type="button">Sign in with SmartThings</button>
+          </div>
+          <label>
+            <span>Authorization code</span>
+            <input id="smartThingsAuthorizationCode" name="authorization_code" type="password" autocomplete="off" placeholder="Paste code from SmartThings OAuth">
+          </label>
+          <label>
+            <span>Redirect URI</span>
+            <input id="smartThingsRedirectUri" name="redirect_uri" type="text" autocomplete="off" placeholder="https://localhost:8088/setup/smartthings/oauth/callback">
+          </label>
+          <label>
+            <span>Refresh token</span>
+            <input id="smartThingsRefreshToken" name="refresh_token" type="password" autocomplete="off" placeholder="Optional if using authorization code">
+          </label>
+          <label>
+            <span>Access token fallback</span>
+            <input id="smartThingsAccessToken" name="access_token" type="password" autocomplete="off" placeholder="Short-lived fallback">
+          </label>
+          <label>
+            <span>Personal access token fallback</span>
+            <input id="smartThingsToken" name="token" type="password" autocomplete="off" placeholder="Expires after 24 hours">
+          </label>
+          <label class="check-row">
+            <input id="excludeOverlaps" name="exclude_overlaps" type="checkbox" checked>
+            <span>Skip devices already imported from a native source</span>
+          </label>
+        </div>
+        <p id="smartThingsOAuthNote" class="form-note">For long-term access, use the HTTPS tunnel redirect URI registered on the SmartThings OAuth-In SmartApp. PATs are only a temporary fallback.</p>
+
+        <footer class="modal-actions">
+          <button id="runSmartThingsImportButton" class="primary-button" type="submit">Import SmartThings</button>
+        </footer>
+      </form>
+
+      <form id="nestImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="nest" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Nest</p>
+            <h2>Add Nest thermostats</h2>
+          </div>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>Device Access project ID</span>
+            <input id="nestProjectId" name="project_id" type="text" autocomplete="off" required>
+          </label>
+          <label>
+            <span>OAuth client ID</span>
+            <input id="nestClientId" name="client_id" type="text" autocomplete="off" placeholder="Required for authorization code or refresh token">
+          </label>
+          <label>
+            <span>OAuth client secret</span>
+            <input id="nestClientSecret" name="client_secret" type="password" autocomplete="off" placeholder="Required for authorization code or refresh token">
+          </label>
+          <label>
+            <span>Authorization code</span>
+            <input id="nestAuthorizationCode" name="authorization_code" type="password" autocomplete="off" placeholder="Use once after Google consent">
+          </label>
+          <label>
+            <span>Refresh token</span>
+            <input id="nestRefreshToken" name="refresh_token" type="password" autocomplete="off" placeholder="Optional if using authorization code">
+          </label>
+          <label>
+            <span>Access token</span>
+            <input id="nestAccessToken" name="access_token" type="password" autocomplete="off" placeholder="Short-lived fallback">
+          </label>
+          <p class="form-note">Use Google Nest Device Access / SDM. Register redirect URI <code>http://localhost:8088/setup/nest/oauth/callback</code> on the OAuth client, then paste an authorization code or token here.</p>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="runNestImportButton" class="primary-button" type="submit">Import Nest</button>
+        </footer>
+      </form>
+
+      <form id="ringImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="ring" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Ring</p>
+            <h2>Add Ring devices</h2>
+          </div>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>Email</span>
+            <input id="ringEmail" name="email" type="email" autocomplete="username">
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="ringPassword" name="password" type="password" autocomplete="current-password">
+          </label>
+          <label>
+            <span>2FA code</span>
+            <input id="ringOtp" name="otp_code" type="text" inputmode="numeric" placeholder="Optional">
+          </label>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="runRingImportButton" class="primary-button" type="submit">Import Ring</button>
+        </footer>
+      </form>
+
+      <form id="yaleImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="yale" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Yale</p>
+            <h2>Add Yale locks</h2>
+          </div>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>Email</span>
+            <input id="yaleEmail" name="email" type="email" autocomplete="username">
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="yalePassword" name="password" type="password" autocomplete="current-password">
+          </label>
+          <label>
+            <span>Verification code</span>
+            <input id="yaleVerificationCode" name="verification_code" type="text" inputmode="numeric" placeholder="Optional">
+          </label>
+          <label>
+            <span>Yale cloud brand</span>
+            <select id="yaleBrand" name="brand">
+              <option value="yale_access">Yale Access</option>
+              <option value="yale_home">Yale Home</option>
+              <option value="august">August</option>
+            </select>
+          </label>
+          <label>
+            <span>Access token fallback</span>
+            <input id="yaleAccessToken" name="access_token" type="password" autocomplete="off" placeholder="Optional">
+          </label>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="runYaleImportButton" class="primary-button" type="submit">Import Yale</button>
+        </footer>
+      </form>
+
+      <form id="cudyAddForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="cudy" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Cudy</p>
+            <h2>Add Cudy router</h2>
+          </div>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>Router name</span>
+            <input id="cudyName" name="name" type="text" autocomplete="off" value="Main Cudy Router" required>
+          </label>
+          <label>
+            <span>Router address</span>
+            <input id="cudyHost" name="host" type="text" inputmode="url" autocomplete="off" value="192.168.10.1" required>
+          </label>
+          <label>
+            <span>Model</span>
+            <input id="cudyModel" name="model" type="text" autocomplete="off" placeholder="WR3000">
+          </label>
+          <label>
+            <span>Admin username</span>
+            <input id="cudyUsername" name="username" type="text" autocomplete="username" value="root">
+          </label>
+          <label>
+            <span>Admin password</span>
+            <input id="cudyPassword" name="password" type="password" autocomplete="current-password" placeholder="Optional for reachability only">
+          </label>
+          <p class="form-note">Stats and reboot need the router admin password. Without it, the card can still show whether the router page is reachable.</p>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="runCudyAddButton" class="primary-button" type="submit">Add Cudy router</button>
+        </footer>
+      </form>
+
+      <form id="printerAddForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="printers" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Printers</p>
+            <h2>Add printer monitor</h2>
+          </div>
+        </header>
+
+        <div class="printer-discover-row">
+          <button id="discoverPrintersButton" class="secondary-button" type="button">Discover printers</button>
+          <select id="discoveredPrinters">
+            <option value="">Discovered printers appear here</option>
+          </select>
+        </div>
+        <p id="printerDiscoveryStatus" class="form-note">Discovery checks the address below first, then Bonjour, CUPS, and printer ports on selected subnets.</p>
+        <label class="printer-discovery-subnet">
+          <span>VPN/VLAN subnet</span>
+          <input id="printerDiscoverySubnet" type="text" inputmode="text" autocomplete="off" placeholder="Optional, example: 10.1.1.0/24">
+        </label>
+
+        <div class="form-grid">
+          <label>
+            <span>Printer name</span>
+            <input id="printerName" name="name" type="text" autocomplete="off" placeholder="Sawgrass SG500" required>
+          </label>
+          <label>
+            <span>Printer address</span>
+            <input id="printerHost" name="host" type="text" inputmode="url" autocomplete="off" placeholder="192.168.10.120" required>
+          </label>
+          <label>
+            <span>Model</span>
+            <select id="printerModel" name="model">
+              <option value="Sawgrass SG500">Sawgrass SG500</option>
+              <option value="Canon G6020">Canon G6020</option>
+              <option value="Canon GP-4600S">Canon GP-4600S</option>
+              <option value="Magicard 300">Magicard 300 badge printer</option>
+              <option value="">Other printer</option>
+            </select>
+          </label>
+          <label>
+            <span>SNMP community</span>
+            <input id="printerCommunity" name="community" type="text" autocomplete="off" value="public">
+          </label>
+          <p class="form-note">Sentinel reads printer status over SNMP and keeps the last successful ink, ribbon, and media snapshot when the printer is offline.</p>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="runPrinterAddButton" class="primary-button" type="submit">Add printer</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="deviceDetailDialog" class="modal detail-modal">
+      <header class="modal-header detail-header">
+        <div>
+          <p id="deviceDetailEyebrow" class="eyebrow">Device</p>
+          <div class="detail-title-row">
+            <span id="deviceDetailIcon" class="device-icon detail-device-icon" aria-hidden="true"></span>
+            <h2 id="deviceDetailTitle">Device</h2>
+            <button id="renameDeviceButton" class="icon-button title-icon-button" type="button" aria-label="Rename device" title="Rename device">✎</button>
+          </div>
+        </div>
+        <button id="closeDeviceDetailButton" class="icon-button" type="button" aria-label="Close device details">×</button>
+      </header>
+      <div id="deviceDetailContent" class="device-detail-body"></div>
+      <footer class="device-detail-footer">
+        <button id="removeDeviceButton" class="danger-button" type="button">Remove device</button>
+      </footer>
+    </dialog>
+
+    <dialog id="cudyRebootDialog" class="modal">
+      <form id="cudyRebootForm" method="dialog">
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">Cudy reboot</p>
+            <h2>Choose target</h2>
+          </div>
+          <button id="closeCudyRebootButton" class="icon-button" type="button" aria-label="Close reboot dialog">×</button>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>Reboot target</span>
+            <select id="cudyRebootTarget" name="target">
+              <option value="main">Main router only</option>
+              <option value="satellites">Mesh satellites only</option>
+              <option value="all">All mesh units</option>
+            </select>
+          </label>
+          <p id="cudyRebootNote" class="form-note">Mesh IPs are refreshed from Cudy before the command is sent.</p>
+        </div>
+
+        <footer class="modal-actions">
+          <button id="cancelCudyRebootButton" class="secondary-button" type="button">Cancel</button>
+          <button id="confirmCudyRebootButton" class="primary-button" type="submit">Continue</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <script src="/static/dashboard.js?v=20260722-printer-low-bucket"></script>
+  </body>
+</html>
