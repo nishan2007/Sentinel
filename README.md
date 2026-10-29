@@ -4,6 +4,30 @@ Static Cloudflare Pages project for a Sentinel-branded customer guest WiFi capti
 
 ## Start Sentinel Locally
 
+On Windows, after the Python environment and dependencies are installed using
+the controller README, double-click `Start Sentinel.cmd`. The launcher uses
+`sentinel-controller/.venv` and serves the dashboard at
+`http://localhost:8088/dashboard`. Close the server with Ctrl+C.
+It defaults to all network interfaces (`0.0.0.0`), so another device on the
+same trusted network can open `http://THIS-PC-IP:8088/dashboard` or
+`http://THIS-PC-IP:8088/homekit`. `SENTINEL_HOST` and `SENTINEL_PORT`
+can override the address and port.
+
+### Start automatically on Windows
+
+Right-click `Set Sentinel Auto Start.ps1`, choose **Run with PowerShell**, and
+Sentinel will start silently whenever the current Windows user signs in. The
+installer creates a shortcut in the user's Startup folder and does not require
+administrator rights. Startup results are recorded in
+`sentinel-controller/data/sentinel-startup.log`.
+
+To inspect or remove auto-start from PowerShell:
+
+```powershell
+& '.\Set Sentinel Auto Start.ps1' -Action Status
+& '.\Set Sentinel Auto Start.ps1' -Action Remove
+```
+
 On macOS, double-click:
 
 ```text

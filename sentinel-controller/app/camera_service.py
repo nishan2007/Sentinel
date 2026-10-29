@@ -8,6 +8,7 @@ import socket
 import subprocess
 import ssl
 import tempfile
+import time
 import urllib.parse
 from typing import Any
 
@@ -351,19 +352,39 @@ async def ensure_live_stream(camera: dict) -> Path:
     playlist = folder / "index.m3u8"
     process = _live_processes.get(camera_id)
     if process and process.returncode is None:
-        return playlist
+        if playlist.exists() and time.time() - playlist.stat().st_mtime < 15:
+            return playlist
+        if playlist.exists():
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+            _live_processes.pop(camera_id, None)
+        else:
+            return playlist
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
-    folder.mkdir(parents=True)
-    process = await asyncio.create_subprocess_exec(
-        FFMPEG_PATH, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
-        "-i", _credential_url(camera, substream=True), "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-c:a", "aac",
-        "-force_key_frames", "expr:gte(t,n_forced*2)",
-        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-        "-hls_flags", "delete_segments+append_list+omit_endlist", str(playlist),
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise CameraServiceError("Sentinel cannot prepare its live-video folder.", 503) from exc
+    try:
+        process = await asyncio.create_subprocess_exec(
+            FFMPEG_PATH, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
+            "-i", _credential_url(camera, substream=True), "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-c:a", "aac",
+            # One-second independently decodable segments keep LAN live-view
+            # latency near 2-4 seconds instead of accumulating a 10+ second
+            # HLS window. temp_file prevents clients reading partial segments.
+            "-force_key_frames", "expr:gte(t,n_forced*1)",
+            "-f", "hls", "-hls_time", "1", "-hls_list_size", "4",
+            "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments+temp_file", str(playlist),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+    except PermissionError as exc:
+        raise CameraServiceError("Windows blocked Sentinel from starting its video processor.", 503) from exc
     _live_processes[camera_id] = process
     for _ in range(100):
         if playlist.exists():
@@ -447,6 +468,7 @@ async def health() -> dict:
 
 
 def routed_private_subnets() -> list[str]:
+    """Return bounded LAN and routed networks for unicast camera discovery."""
     configured = [value.strip() for value in os.getenv("SENTINEL_CAMERA_SUBNETS", "").split(",") if value.strip()]
     candidates = list(configured)
     commands = []
@@ -468,12 +490,10 @@ def routed_private_subnets() -> list[str]:
         if token in {"default", "0.0.0.0", "127", "224.0.0/4", "255.255.255.255/32"}:
             continue
         command_name = commands[0][0]
-        if command_name == "netstat" and (len(parts) < 2 or parts[1].startswith("link#")):
+        if command_name == "netstat" and len(parts) < 2:
             continue
-        if command_name == "ip" and "via" not in parts:
-            continue
-        if os.name == "nt" and any(part.lower() == "on-link" for part in parts):
-            continue
+        # Directly connected networks need unicast too: many cameras do not
+        # answer WS-Discovery, or multicast is filtered by the LAN/firewall.
         try:
             if os.name == "nt" and len(parts) >= 2 and "." in parts[1]:
                 network = ipaddress.ip_network(f"{parts[0]}/{parts[1]}", strict=False)
@@ -606,21 +626,31 @@ async def discover_onvif(timeout_seconds: float = 3, subnets: list[str] | None =
             services = discovery.searchServices(timeout=timeout_seconds)
             found = {}
             for service in services:
+                types = [str(x) for x in service.getTypes() or []]
+                scopes = [str(x) for x in service.getScopes() or []]
                 for xaddr in service.getXAddrs() or []:
                     parsed = urllib.parse.urlsplit(xaddr)
                     if not parsed.hostname:
+                        continue
+                    # WS-Discovery also advertises printers and Windows PCs.
+                    if not (any("onvif.org" in value.lower() for value in types + scopes)
+                            or parsed.path.lower().startswith("/onvif/")):
                         continue
                     try:
                         _private_host(parsed.hostname)
                     except CameraServiceError:
                         continue
                     found[parsed.hostname] = {"host": parsed.hostname, "xaddr": xaddr,
-                                              "types": [str(x) for x in service.getTypes() or []],
-                                              "scopes": [str(x) for x in service.getScopes() or []]}
+                                              "types": types, "scopes": scopes}
             return list(found.values())
         finally:
             discovery.stop()
-    multicast = await asyncio.to_thread(run)
+    multicast_error = None
+    try:
+        multicast = await asyncio.to_thread(run)
+    except OSError:
+        multicast = []
+        multicast_error = "Multicast discovery is unavailable; used IP probing instead."
     targets = list(subnets or [])
     if scan_routed_subnets:
         targets.extend(routed_private_subnets())
@@ -631,7 +661,7 @@ async def discover_onvif(timeout_seconds: float = 3, subnets: list[str] | None =
         item.setdefault("source", "multicast")
         merged[item["host"]] = item
     return {"cameras": list(merged.values()), "scanned_subnets": targets,
-            "multicast_available": bool(multicast)}
+            "multicast_available": bool(multicast), "multicast_error": multicast_error}
 
 
 async def onvif_profiles(host: str, port: int, username: str | None, password: str | None) -> list[dict]:
@@ -655,3 +685,62 @@ async def onvif_profiles(host: str, port: int, username: str | None, password: s
                            "height": getattr(resolution, "Height", None)})
         return result
     return await asyncio.to_thread(run)
+
+
+def _onvif_ptz(camera: dict):
+    try:
+        from onvif import ONVIFCamera
+        client = ONVIFCamera(camera["host"], 80, camera.get("username") or "", camera.get("password") or "")
+        media = client.create_media_service()
+        profiles = media.GetProfiles()
+        profile = next((item for item in profiles if getattr(item, "PTZConfiguration", None)), None)
+        if not profile:
+            raise CameraServiceError("This camera does not report ONVIF PTZ support.", 422)
+        return client.create_ptz_service(), profile.token, profile.PTZConfiguration
+    except CameraServiceError:
+        raise
+    except Exception as exc:
+        raise CameraServiceError("Unable to connect to this camera's ONVIF PTZ service.", 502) from exc
+
+
+async def ptz_capabilities(camera: dict) -> dict:
+    def run() -> dict:
+        try:
+            _, _, configuration = _onvif_ptz(camera)
+            return {
+                "supported": True,
+                "pan_tilt": bool(getattr(configuration, "DefaultContinuousPanTiltVelocitySpace", None)),
+                "zoom": bool(getattr(configuration, "DefaultContinuousZoomVelocitySpace", None)),
+            }
+        except CameraServiceError as exc:
+            if exc.status_code == 422:
+                return {"supported": False, "pan_tilt": False, "zoom": False}
+            raise
+    return await asyncio.to_thread(run)
+
+
+async def ptz_move(camera: dict, pan: float, tilt: float, zoom: float) -> None:
+    if not any((pan, tilt, zoom)):
+        return await ptz_stop(camera)
+    def run() -> None:
+        ptz, token, _ = _onvif_ptz(camera)
+        velocity: dict[str, dict[str, float]] = {}
+        if pan or tilt:
+            velocity["PanTilt"] = {"x": pan, "y": tilt}
+        if zoom:
+            velocity["Zoom"] = {"x": zoom}
+        try:
+            ptz.ContinuousMove({"ProfileToken": token, "Velocity": velocity})
+        except Exception as exc:
+            raise CameraServiceError("The camera rejected the PTZ movement command.", 502) from exc
+    await asyncio.to_thread(run)
+
+
+async def ptz_stop(camera: dict) -> None:
+    def run() -> None:
+        ptz, token, _ = _onvif_ptz(camera)
+        try:
+            ptz.Stop({"ProfileToken": token, "PanTilt": True, "Zoom": True})
+        except Exception as exc:
+            raise CameraServiceError("The camera rejected the PTZ stop command.", 502) from exc
+    await asyncio.to_thread(run)

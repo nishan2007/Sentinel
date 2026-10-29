@@ -492,6 +492,14 @@ button {
   background: var(--field);
 }
 
+.setup-link-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  text-decoration: none;
+}
+
 .primary-button {
   border: 0;
   color: #ffffff;
@@ -630,6 +638,347 @@ button {
 
 .device-card.appliance-card {
   grid-row: span 4;
+}
+
+.device-card.tuya-climate-card {
+  --card-accent: #0aa7d6;
+  grid-row: span 7;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(85, 211, 239, 0.2), transparent 34%),
+    linear-gradient(155deg, rgba(248, 254, 255, 0.98), rgba(231, 246, 250, 0.94)),
+    var(--panel);
+}
+
+.device-card.tuya-climate-card[data-status="off"] {
+  --card-accent: #7b91a8;
+}
+
+.tuya-climate-card .device-body {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tuya-climate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: 100%;
+  gap: 13px;
+  color: var(--ink);
+}
+
+.climate-hero {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 154px;
+  padding: 8px 42px;
+}
+
+.climate-temperature-controls {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.climate-dial {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  display: grid;
+  grid-template-columns: auto auto;
+  place-content: center;
+  align-items: end;
+  border: 8px solid rgba(15, 166, 210, 0.14);
+  border-top-color: #18b6dd;
+  border-right-color: #4ed0ec;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 13px 30px rgba(25, 127, 160, 0.16), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+}
+
+.climate-dial-label {
+  grid-column: 1 / -1;
+  margin-bottom: 1px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.climate-dial strong {
+  font-size: 2.9rem;
+  font-weight: 750;
+  line-height: 0.95;
+  letter-spacing: -0.08em;
+}
+
+.climate-dial small {
+  margin: 0 0 5px 4px;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.climate-temp-button,
+.climate-power,
+.climate-choices button,
+.climate-switch {
+  border: 1px solid rgba(12, 133, 168, 0.2);
+  color: #087b9c;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 5px 15px rgba(20, 111, 139, 0.08);
+}
+
+.climate-temp-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.climate-power {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 1.2rem;
+}
+
+.tuya-climate.is-on .climate-power {
+  border-color: #0f9d82;
+  color: white;
+  background: linear-gradient(145deg, #22c79b, #0e9a82);
+}
+
+.tuya-climate.is-off .climate-dial {
+  filter: grayscale(0.8);
+  opacity: 0.68;
+}
+
+.climate-room-status {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 7px;
+  margin-top: -8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.climate-room-status strong {
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+
+.climate-running-state::before {
+  content: "·";
+  margin-right: 7px;
+}
+
+.climate-control-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: 100%;
+  gap: 11px;
+}
+
+.climate-choice-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: 100%;
+  gap: 6px;
+}
+
+.climate-control-label {
+  color: var(--muted);
+  font-size: 0.69rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.climate-choices {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  gap: 5px;
+}
+
+.climate-choices button {
+  width: 0;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 5px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.climate-choices button[data-active="true"] {
+  border-color: #159fc3;
+  color: white;
+  background: linear-gradient(145deg, #19b7dd, #078fb9);
+  box-shadow: 0 7px 16px rgba(7, 143, 185, 0.2);
+}
+
+.climate-choices.is-many {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.climate-choices.is-many button {
+  width: auto;
+}
+
+.climate-section-label {
+  margin: 8px 0 0;
+  padding: 12px 2px 2px;
+  border-top: 1px solid color-mix(in srgb, #159fc3 18%, var(--line));
+  color: #087b9c;
+  font-size: 0.86rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.climate-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(145px, 0.8fr);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid rgba(12, 133, 168, 0.13);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.climate-select-row > span {
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.climate-select-row select {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid rgba(12, 133, 168, 0.2);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--panel);
+  padding: 7px 9px;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.climate-swing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid rgba(12, 133, 168, 0.13);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.climate-swing-row > div {
+  display: grid;
+  gap: 2px;
+}
+
+.climate-swing-row span {
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.climate-swing-row strong {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.climate-switch {
+  position: relative;
+  width: 43px;
+  height: 24px;
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.climate-switch span {
+  width: 18px;
+  height: 18px;
+  display: block;
+  border-radius: 50%;
+  background: #8ca3b2;
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.climate-switch[data-active="true"] {
+  background: #18b6dd;
+}
+
+.climate-switch[data-active="true"] span {
+  background: white;
+  transform: translateX(17px);
+}
+
+.tuya-climate button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.tuya-climate-detail {
+  width: 100%;
+  max-width: 620px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 22px;
+  border: 1px solid color-mix(in srgb, #18b6dd 24%, var(--line));
+  border-radius: 22px;
+  background: radial-gradient(circle at 12% 5%, rgba(85, 211, 239, 0.18), transparent 38%), var(--panel);
+}
+
+.tuya-climate.is-expanded .climate-hero {
+  min-height: 190px;
+}
+
+.tuya-climate.is-expanded .climate-dial {
+  width: 164px;
+  height: 164px;
+}
+
+body.is-dark-mode .device-card.tuya-climate-card,
+body.is-dark-mode .tuya-climate-detail {
+  background: radial-gradient(circle at 12% 8%, rgba(15, 164, 205, 0.18), transparent 38%), var(--panel);
+}
+
+body.is-dark-mode .climate-dial,
+body.is-dark-mode .climate-swing-row,
+body.is-dark-mode .climate-select-row,
+body.is-dark-mode .climate-select-row select,
+body.is-dark-mode .climate-temp-button,
+body.is-dark-mode .climate-power,
+body.is-dark-mode .climate-choices button {
+  background-color: #101d27;
+  color: var(--ink);
+}
+
+@media (max-width: 560px) {
+  .climate-select-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }
 
 .device-card.fridge-dashboard-card {
@@ -3725,6 +4074,41 @@ body.is-dark-mode .empty-state {
   gap: 12px;
 }
 
+.printer-job-countdown {
+  margin: 0;
+  color: #176e62;
+  font-size: .9rem;
+  font-weight: 900;
+}
+
+.printer-progress-label {
+  color: #34524e;
+  font-size: .8rem;
+  font-weight: 800;
+}
+
+.k2-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.k2-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.k2-control-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+@media (max-width: 800px) {
+  .k2-overview { grid-template-columns: 1fr; }
+}
+
 .printer-discover-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3876,6 +4260,71 @@ body.is-dark-mode .empty-state {
   gap: 14px;
 }
 
+.printer-job-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dce5e2;
+}
+
+.printer-job-progress span {
+  display: block;
+  width: calc(var(--print-progress, 0) * 1%);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2f8f7f, #63cdb9);
+}
+
+.printer-job-meta { margin: 0; }
+
+.printer-camera-card { display: grid; gap: 12px; }
+
+.printer-camera-frame {
+  width: 100%;
+  min-height: 360px;
+  border: 0;
+  border-radius: 14px;
+  background: #0f1d1b;
+}
+
+.printer-camera-link { justify-self: start; }
+
+.cfs-spool-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cfs-spool {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-top: 6px solid var(--filament-color);
+  border-radius: 12px;
+}
+
+.cfs-spool.is-selected { box-shadow: 0 0 0 2px rgba(47, 143, 127, 0.35); }
+.cfs-spool.is-empty { opacity: 0.55; filter: grayscale(0.8); }
+.cfs-spool span, .cfs-spool small { color: var(--muted); font-size: 0.76rem; }
+
+.printer-diagnostic-events { display: grid; gap: 8px; }
+
+.printer-diagnostic-events > div {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.printer-diagnostic-events span,
+.printer-diagnostic-events small { color: var(--muted); }
+.printer-diagnostic-events small { font-size: 0.72rem; }
+.printer-log-details summary { cursor: pointer; font-weight: 800; }
+.printer-log-details pre { max-height: 280px; overflow: auto; padding: 12px; border-radius: 10px; color: #d6ebe6; background: #0f1d1b; white-space: pre-wrap; }
+
 .printer-hero {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3960,6 +4409,9 @@ body.is-dark-mode .printer-ink-track {
   .printer-hero {
     grid-template-columns: 1fr;
   }
+
+  .cfs-spool-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .printer-camera-frame { min-height: 240px; }
 
   .stove-planner,
   .stove-start-form {

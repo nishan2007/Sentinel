@@ -6,7 +6,7 @@
     <title>Sentinel Dashboard</title>
     <link rel="icon" href="/brand/sentinel-mark.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/brand/png/sentinel-app-icon-1024.png">
-    <link rel="stylesheet" href="/static/dashboard.css?v=20260708-camera-feed-repair">
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260921-k2-home">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
   </head>
   <body>
@@ -27,6 +27,7 @@
 
         <nav class="nav-list" aria-label="Device filters">
           <a class="nav-button camera-nav-link" href="/cameras"><span class="nav-label">Cameras / NVR</span><span>›</span></a>
+          <a class="nav-button camera-nav-link" href="/homekit"><span class="nav-label">Apple Home</span><span>›</span></a>
           <button class="nav-button is-active" type="button" data-filter="all"><span class="nav-label">All devices</span> <span id="allCount">0</span></button>
           <button class="nav-button" type="button" data-filter="on"><span class="nav-label">On</span> <span id="onCount">0</span></button>
           <button class="nav-button" type="button" data-filter="off"><span class="nav-label">Off</span> <span id="offCount">0</span></button>
@@ -57,7 +58,10 @@
               <button id="repairDuplicatesButton" class="service-button" type="button">Repair duplicates</button>
             </div>
           </div>
+          <a class="secondary-button setup-link-button" href="/homekit">Set up Apple Home</a>
           <a class="docs-link" href="/docs">API docs</a>
+          <button id="restartSentinelButton" class="secondary-button" type="button">Restart Sentinel</button>
+          <p id="restartSentinelStatus" role="status" aria-live="polite"></p>
         </section>
       </aside>
 
@@ -126,6 +130,7 @@
 
         <div class="import-provider-tabs" role="tablist" aria-label="Import source">
           <button class="import-provider-button is-active" type="button" data-import-provider="meross">Meross</button>
+          <button class="import-provider-button" type="button" data-import-provider="smartlife-smarthome">SmartLife AC</button>
           <button class="import-provider-button" type="button" data-import-provider="smartthings">SmartThings</button>
           <button class="import-provider-button" type="button" data-import-provider="nest">Nest</button>
           <button class="import-provider-button" type="button" data-import-provider="ring">Ring</button>
@@ -154,6 +159,35 @@
             <button id="runImportButton" class="primary-button" type="submit">Import</button>
           </footer>
         </div>
+      </form>
+
+      <form id="smartLifeSmarthomeImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="smartlife-smarthome" hidden>
+        <header class="modal-header compact">
+          <div>
+            <p class="eyebrow">SmartLife-SmartHome</p>
+            <h2>Sign in to add your Milexus AC</h2>
+          </div>
+        </header>
+
+        <p class="form-note">Use the same email address or phone number and password as the iPhone app. Your password is used once and is not saved.</p>
+        <p id="smartLifeSmarthomeStatus" class="form-note" role="status" hidden></p>
+        <div class="form-grid">
+          <label>
+            <span>Email or phone number</span>
+            <input id="smartLifeSmarthomeUsername" name="username" type="text" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="smartLifeSmarthomePassword" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <label>
+            <span>Country calling code</span>
+            <input id="smartLifeSmarthomeCountryCode" name="country_code" type="text" inputmode="numeric" value="1" required>
+          </label>
+        </div>
+        <footer class="modal-actions">
+          <button id="runSmartLifeSmarthomeImportButton" class="primary-button" type="submit">Sign in and add AC</button>
+        </footer>
       </form>
 
       <form id="smartThingsImportForm" method="dialog" class="modal-section import-provider-panel" data-import-panel="smartthings" hidden>
@@ -390,6 +424,7 @@
               <option value="Canon G6020">Canon G6020</option>
               <option value="Canon GP-4600S">Canon GP-4600S</option>
               <option value="Magicard 300">Magicard 300 badge printer</option>
+              <option value="Creality K2 Pro">Creality K2 Pro 3D printer</option>
               <option value="">Other printer</option>
             </select>
           </label>
@@ -397,7 +432,15 @@
             <span>SNMP community</span>
             <input id="printerCommunity" name="community" type="text" autocomplete="off" value="public">
           </label>
-          <p class="form-note">Sentinel reads printer status over SNMP and keeps the last successful ink, ribbon, and media snapshot when the printer is offline.</p>
+          <label>
+            <span>3D printer camera URL</span>
+            <input id="printerCameraUrl" name="camera_url" type="url" autocomplete="off" placeholder="Optional, defaults to http://PRINTER-IP:4408/camera.html">
+          </label>
+          <label class="checkbox-row">
+            <input id="printerSshDiagnostics" name="ssh_diagnostics" type="checkbox">
+            <span>Enable SSH restart diagnostics (root key authentication)</span>
+          </label>
+          <p class="form-note">Office printers use SNMP. Creality K2 Pro uses its local port 9999 for print, temperature, fan, and CFS status. Its camera URL can point to the printer's installed local camera viewer.</p>
         </div>
 
         <footer class="modal-actions">
@@ -453,6 +496,7 @@
       </form>
     </dialog>
 
-    <script src="/static/dashboard.js?v=20260722-printer-low-bucket"></script>
+    <script src="/static/dashboard.js?v=20260921-k2-home"></script>
+    <script src="/static/system.js?v=20260908" defer></script>
   </body>
 </html>

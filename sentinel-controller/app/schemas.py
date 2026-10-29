@@ -91,6 +91,28 @@ class NestCommandRequest(BaseModel):
     cool_celsius: Optional[float] = Field(default=None, ge=5, le=35)
 
 
+class TuyaCommandRequest(BaseModel):
+    power: Optional[bool] = None
+    mode: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    target_temperature: Optional[float] = Field(default=None, ge=5, le=40)
+    fan_speed: Optional[str | int] = None
+    swing: Optional[str | bool] = None
+    sleep: Optional[str] = Field(default=None, pattern="^(off|normal|old|child)$")
+    vertical_swing: Optional[str] = Field(default=None, pattern="^[0-3]$")
+    horizontal_swing: Optional[str] = Field(default=None, pattern="^[0-7]$")
+    vertical_airflow: Optional[str] = Field(default=None, pattern="^[0-5]$")
+    horizontal_airflow: Optional[str] = Field(default=None, pattern="^[0-8]$")
+    combined_swing: Optional[str] = Field(default=None, pattern="^[0-3]$")
+    temperature_airflow: Optional[bool] = None
+    energy_saver: Optional[str] = Field(default=None, pattern="^[0-3]$")
+    gen_mode: Optional[str] = Field(default=None, pattern="^(off|L1|L2|L3)$")
+    power_limit: Optional[str] = Field(default=None, pattern="^[1-5]$")
+    energy_saver_temperature: Optional[int] = Field(default=None, ge=26, le=31)
+    eco: Optional[bool] = None
+    health: Optional[bool] = None
+    gentle_wind: Optional[bool] = None
+
+
 class NetworkScanRequest(BaseModel):
     subnet: Optional[str] = Field(
         default=None,
@@ -148,6 +170,28 @@ class MerossCloudImportedDevice(BaseModel):
 class MerossCloudImportResponse(BaseModel):
     imported: list[MerossCloudImportedDevice]
     account_key_available: bool
+    note: str
+
+
+class WankeziImportRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=255)
+    password: SecretStr
+    country_code: str = Field(default="1", min_length=1, max_length=4)
+    save_devices: bool = True
+
+
+class WankeziImportedDevice(BaseModel):
+    id: Optional[int] = None
+    name: str
+    device_uuid: str
+    product_id: Optional[str] = None
+    host: Optional[str] = None
+    saved: bool
+    note: Optional[str] = None
+
+
+class WankeziImportResponse(BaseModel):
+    imported: list[WankeziImportedDevice]
     note: str
 
 
@@ -332,11 +376,23 @@ class PrinterInkRefillRequest(BaseModel):
     color: str = Field(min_length=1, max_length=40)
 
 
+class PrinterSshDiagnosticsRequest(BaseModel):
+    enabled: bool = True
+    username: str = Field(default="root", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    port: int = Field(default=22, ge=1, le=65535)
+
+
 class CameraOnvifProfilesRequest(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=80, ge=1, le=65535)
     username: Optional[str] = Field(default=None, max_length=255)
     password: Optional[SecretStr] = None
+
+
+class CameraPtzMoveRequest(BaseModel):
+    pan: float = Field(default=0, ge=-1, le=1)
+    tilt: float = Field(default=0, ge=-1, le=1)
+    zoom: float = Field(default=0, ge=-1, le=1)
 
 
 class CameraStorageUpdate(BaseModel):

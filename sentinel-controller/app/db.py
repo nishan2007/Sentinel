@@ -78,6 +78,22 @@ async def init_db() -> None:
             );
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS printer_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+            """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_printer_diagnostics_device_time ON printer_diagnostics(device_id, id DESC)"
+        )
         await db.commit()
 
 
@@ -194,3 +210,34 @@ async def save_last_state(device_id: int, state: str) -> None:
             (state, device_id),
         )
         await db.commit()
+
+
+async def add_printer_diagnostic(device_id: int, event_type: str, message: str, details: dict | None = None) -> None:
+    import json
+    async with connection_context() as db:
+        await db.execute(
+            "INSERT INTO printer_diagnostics (device_id, event_type, message, details) VALUES (?, ?, ?, ?)",
+            (device_id, event_type, message, json.dumps(details or {})),
+        )
+        await db.execute(
+            "DELETE FROM printer_diagnostics WHERE device_id = ? AND id NOT IN (SELECT id FROM printer_diagnostics WHERE device_id = ? ORDER BY id DESC LIMIT 200)",
+            (device_id, device_id),
+        )
+        await db.commit()
+
+
+async def list_printer_diagnostics(device_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    import json
+    async with connection_context() as db:
+        cursor = await db.execute(
+            "SELECT id, event_type, message, details, created_at FROM printer_diagnostics WHERE device_id = ? ORDER BY id DESC LIMIT ?",
+            (device_id, max(1, min(200, limit))),
+        )
+        rows = await cursor.fetchall()
+    return [{
+        "id": row["id"],
+        "eventType": row["event_type"],
+        "message": row["message"],
+        "details": json.loads(row["details"] or "{}"),
+        "createdAt": row["created_at"],
+    } for row in rows]

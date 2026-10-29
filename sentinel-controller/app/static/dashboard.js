@@ -17,6 +17,8 @@
     ipCameraTileLiveWatchdogs: new Map(),
     ipCameraTileLiveLastFrame: new Map(),
     ipCameraTileLiveRepairs: new Set(),
+    k2Refreshes: new Set(),
+    printerCameraFrame: null,
     showLiveCameraTiles: window.localStorage.getItem("sentinel.showLiveCameraTiles") === "true",
     seenRingAlerts: new Set(),
     activeRingNotification: null,
@@ -264,6 +266,12 @@
     merossPassword: document.getElementById("merossPassword"),
     merossMfa: document.getElementById("merossMfa"),
     runImportButton: document.getElementById("runImportButton"),
+    smartLifeSmarthomeImportForm: document.getElementById("smartLifeSmarthomeImportForm"),
+    smartLifeSmarthomeUsername: document.getElementById("smartLifeSmarthomeUsername"),
+    smartLifeSmarthomePassword: document.getElementById("smartLifeSmarthomePassword"),
+    smartLifeSmarthomeCountryCode: document.getElementById("smartLifeSmarthomeCountryCode"),
+    smartLifeSmarthomeStatus: document.getElementById("smartLifeSmarthomeStatus"),
+    runSmartLifeSmarthomeImportButton: document.getElementById("runSmartLifeSmarthomeImportButton"),
     reliabilityStatus: document.getElementById("reliabilityStatus"),
     reliabilityDetail: document.getElementById("reliabilityDetail"),
     runCloudRefreshButton: document.getElementById("runCloudRefreshButton"),
@@ -312,6 +320,8 @@
     printerHost: document.getElementById("printerHost"),
     printerModel: document.getElementById("printerModel"),
     printerCommunity: document.getElementById("printerCommunity"),
+    printerCameraUrl: document.getElementById("printerCameraUrl"),
+    printerSshDiagnostics: document.getElementById("printerSshDiagnostics"),
     printerDiscoverySubnet: document.getElementById("printerDiscoverySubnet"),
     printerDiscoveryStatus: document.getElementById("printerDiscoveryStatus"),
     discoverPrintersButton: document.getElementById("discoverPrintersButton"),
@@ -432,6 +442,9 @@
   }
   elements.deviceDetailDialog.addEventListener("close", function () {
     closeAllRingWebRtcFeeds();
+    // Removing the iframe stops the printer camera's network stream.
+    elements.deviceDetailContent.replaceChildren();
+    state.printerCameraFrame = null;
   });
   elements.closeCudyRebootButton.addEventListener("click", function () {
     elements.cudyRebootDialog.close("cancel");
@@ -446,6 +459,7 @@
   });
 
   elements.importForm.addEventListener("submit", handleImportSubmit);
+  elements.smartLifeSmarthomeImportForm.addEventListener("submit", handleSmartLifeSmarthomeImportSubmit);
   elements.smartThingsImportForm.addEventListener("submit", handleSmartThingsImportSubmit);
   elements.startSmartThingsOAuthButton.addEventListener("click", handleSmartThingsOAuthStart);
   elements.nestImportForm.addEventListener("submit", handleNestImportSubmit);
@@ -460,6 +474,7 @@
     const activeProvider = provider || "meross";
     const labels = {
       meross: "Import Meross devices",
+      "smartlife-smarthome": "Add Milexus AC",
       smartthings: "Add SmartThings devices",
       nest: "Add Nest thermostats",
       ring: "Add Ring devices",
@@ -515,6 +530,19 @@
     refreshRingTileSnapshots();
     refreshIpCameraTileSnapshots();
   }, 60000);
+  window.setInterval(function () {
+    state.devices.filter(function (device) {
+      return isK2Printer(device);
+    }).forEach(refreshK2Device);
+  }, 10000);
+  window.setInterval(function () {
+    const dialog = elements.deviceDetailDialog;
+    const deviceId = Number(dialog.dataset.deviceId);
+    if (dialog.open && state.devices.some(function (device) { return device.id === deviceId && isK2Printer(device); })) {
+      refreshK2Device(state.devices.find(function (device) { return device.id === deviceId; }));
+    }
+  }, 4000);
+  window.setInterval(updateK2Countdowns, 1000);
 
   async function refreshDashboard(options) {
     if (state.isRefreshing) {
@@ -785,6 +813,47 @@
     } finally {
       elements.runImportButton.disabled = false;
       elements.runImportButton.textContent = "Import";
+    }
+  }
+
+  async function handleSmartLifeSmarthomeImportSubmit(event) {
+    event.preventDefault();
+    const button = elements.runSmartLifeSmarthomeImportButton;
+    elements.smartLifeSmarthomeStatus.hidden = true;
+    elements.smartLifeSmarthomeStatus.textContent = "";
+    button.disabled = true;
+    button.textContent = "Signing in...";
+    try {
+      const result = await requestJson("/setup/smartlife-smarthome/import", {
+        method: "POST",
+        body: JSON.stringify({
+          username: elements.smartLifeSmarthomeUsername.value.trim(),
+          password: elements.smartLifeSmarthomePassword.value,
+          country_code: elements.smartLifeSmarthomeCountryCode.value.trim() || "1",
+          save_devices: true
+        })
+      });
+      const savedCount = result.imported.filter(function (item) { return item.saved; }).length;
+      elements.smartLifeSmarthomePassword.value = "";
+      if (savedCount) {
+        elements.importDialog.close();
+        showBanner("Your Milexus AC was added for local control.", "success");
+        await refreshDashboard({ showBanner: false });
+      } else {
+        const reason = result.imported.map(function (item) { return item.note; }).filter(Boolean).join(" ");
+        elements.smartLifeSmarthomeStatus.textContent = reason || "Signed in, but no locally controllable AC was found.";
+        elements.smartLifeSmarthomeStatus.hidden = false;
+        showBanner(reason || "Signed in, but no locally controllable AC was found.", "error");
+      }
+    } catch (error) {
+      elements.smartLifeSmarthomePassword.value = "";
+      const message = error.message || "SmartLife-SmartHome sign-in failed.";
+      elements.smartLifeSmarthomeStatus.textContent = message;
+      elements.smartLifeSmarthomeStatus.hidden = false;
+      showBanner(message, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "Sign in and add AC";
     }
   }
 
@@ -1064,6 +1133,14 @@
     const host = cleanRouterHost(elements.printerHost.value);
     const model = elements.printerModel.value.trim();
     const community = elements.printerCommunity.value.trim() || "public";
+    const cameraUrl = elements.printerCameraUrl.value.trim();
+    const is3dPrinter = /creality\s+k2/i.test(model + " " + name);
+    const settings = { community: community };
+    if (cameraUrl) settings.camera_url = cameraUrl;
+    if (is3dPrinter && elements.printerSshDiagnostics.checked) {
+      settings.ssh_diagnostics = true;
+      settings.ssh_username = "root";
+    }
 
     if (!name || !host) {
       showBanner("Printer name and address are required.", "error");
@@ -1075,10 +1152,10 @@
       brand: "printer",
       model: model || null,
       host: host,
-      device_type: "printer",
+      device_type: is3dPrinter ? "3d-printer" : "printer",
       channel: 0,
       is_enabled: true,
-      device_key: JSON.stringify({ community: community })
+      device_key: JSON.stringify(settings)
     };
 
     elements.runPrinterAddButton.disabled = true;
@@ -1153,7 +1230,7 @@
 
   function discoveryStatusText(subnets) {
     const targets = subnets.length ? subnets.join(", ") : "the current local network";
-    return "Searching " + targets + " with CUPS, Bonjour, SNMP, IPP, and raw printer port checks...";
+    return "Searching " + targets + " with Creality K2, CUPS, Bonjour, SNMP, IPP, and printer port checks...";
   }
 
   function renderDiscoveredPrinters(printers) {
@@ -1175,10 +1252,13 @@
       printer.name || printer.model || printer.host || "Printer",
       printer.host,
       printer.model,
-      printer.snmp_supported ? "SNMP ready" : printer.status || "Found"
+      printer.k2_supported ? "K2 local status ready" : printer.snmp_supported ? "SNMP ready" : printer.status || "Found"
     ].filter(Boolean);
     if (printer.ink_count) {
       parts.push(printer.ink_count + " supplies");
+    }
+    if (printer.k2_supported && printer.current_project) {
+      parts.push(printer.current_project);
     }
     return parts.join(" · ");
   }
@@ -1421,12 +1501,16 @@
   function renderDeviceCard(device) {
     const deviceState = state.states.get(device.id) || { status: "loading", isOn: null, error: "" };
     const tileApplianceType = dashboardApplianceType(device, deviceState);
+    const isClimate = isTuyaClimate(device, deviceState);
     const isCameraLandscape = isCameraLandscapeTile(device);
     const card = document.createElement("article");
     card.className = "device-card";
     card.dataset.deviceId = String(device.id);
     if (isAppliance(device) || isNest(device) || isPrinter(device)) {
       card.classList.add("appliance-card");
+    }
+    if (isClimate) {
+      card.classList.add("tuya-climate-card");
     }
     if (tileApplianceType === "refrigerator") {
       card.classList.add("fridge-dashboard-card");
@@ -1547,7 +1631,9 @@
     if (state.showAdminDeviceDetails && !isCameraLandscape) {
       body.appendChild(renderMeta(device));
     }
-    if (isGarage(device)) {
+    if (isClimate) {
+      body.appendChild(renderTuyaClimateControl(device, deviceState, false));
+    } else if (isGarage(device)) {
       body.appendChild(renderGarageTileStatus(deviceState));
     } else if (isPrinter(device)) {
       body.appendChild(renderPrinterTileStatus(deviceState.appliance || {}, deviceState));
@@ -1568,7 +1654,9 @@
     }
     const actions = document.createElement("div");
     actions.className = "device-actions";
-    if (isCudy(device)) {
+    if (isClimate) {
+      // The climate panel contains its own purpose-built controls.
+    } else if (isCudy(device)) {
       actions.appendChild(actionButton("Stats", "cudy-stats", device.id, deviceState.status));
       actions.appendChild(actionButton("Speed test", "cudy-speedtest", device.id, deviceState.status));
       actions.appendChild(actionButton("Credentials", "cudy-credentials", device.id, deviceState.status));
@@ -1650,6 +1738,15 @@
       return "refrigerator";
     }
     return "";
+  }
+
+  function isTuyaClimate(device, deviceState) {
+    const appliance = deviceState && deviceState.appliance;
+    if (appliance && appliance.kind === "air-conditioner") {
+      return true;
+    }
+    const text = deviceText(device);
+    return device.brand === "tuya" && (text.includes("air-conditioner") || text.includes("air conditioner") || /(^|\s)ac(\s|$)/.test(text));
   }
 
   function applianceForDashboard(device, deviceState) {
@@ -1817,6 +1914,7 @@
   function renderPrinterTileStatus(appliance, deviceState) {
     const wrapper = document.createElement("div");
     wrapper.className = "printer-tile";
+    const is3dPrinter = appliance.type === "3d-printer";
     const supplies = (appliance.inkLevels || []).slice(0, 6);
     const hasEstimatedInk = supplies.some(isBucketedInkEstimate);
     const summary = document.createElement("div");
@@ -1824,9 +1922,41 @@
     summary.innerHTML = "<strong></strong><span></span>";
     const lowest = appliance.lowestInkPercent;
     const isRefreshing = deviceState.status === "loading";
-    summary.querySelector("strong").textContent = lowest !== null && lowest !== undefined ? (hasEstimatedInk ? "~" : "") + lowest + "% lowest" : isRefreshing ? "Refreshing" : appliance.status || (deviceState.isOn ? "Online" : "Offline");
-    summary.querySelector("span").textContent = appliance.stale ? "Last known" : isRefreshing ? "Updating" : hasEstimatedInk ? "Canon estimate" : appliance.message || appliance.status || "Ready";
+    const stale = is3dPrinter && isK2StatusStale(appliance, deviceState);
+    summary.querySelector("strong").textContent = is3dPrinter ? (stale ? "Last known · " : "") + (appliance.status || "Idle") : lowest !== null && lowest !== undefined ? (hasEstimatedInk ? "~" : "") + lowest + "% lowest" : isRefreshing ? "Refreshing" : appliance.status || (deviceState.isOn ? "Online" : "Offline");
+    summary.querySelector("span").textContent = is3dPrinter ? appliance.currentProject || "No active print" : appliance.stale ? "Last known" : isRefreshing ? "Updating" : hasEstimatedInk ? "Canon estimate" : appliance.message || appliance.status || "Ready";
     wrapper.appendChild(summary);
+
+    if (is3dPrinter) {
+      const progress = document.createElement("div");
+      progress.className = "printer-job-progress";
+      progress.style.setProperty("--print-progress", String(Math.max(0, Math.min(100, Number(appliance.progress) || 0))));
+      progress.innerHTML = "<span></span>";
+      wrapper.appendChild(progress);
+      const temps = appliance.temperatures || {};
+      const meta = document.createElement("p");
+      meta.className = "detail-muted printer-job-meta";
+      meta.textContent = [
+        stale ? "Last updated " + formatRelativeTime(appliance.checkedAt) : null,
+        temps.nozzle !== null && temps.nozzle !== undefined ? "Nozzle " + Math.round(temps.nozzle) + "°C" : null,
+        temps.bed !== null && temps.bed !== undefined ? "Bed " + Math.round(temps.bed) + "°C" : null,
+        appliance.layer !== null && appliance.layer !== undefined ? "Layer " + appliance.layer + (appliance.totalLayers ? "/" + appliance.totalLayers : "") : null
+      ].filter(Boolean).join(" · ");
+      wrapper.appendChild(meta);
+      if (!stale && appliance.stateKey === "printing" && appliance.remainingSeconds !== null && appliance.remainingSeconds !== undefined) {
+        const countdown = document.createElement("p");
+        countdown.className = "printer-job-countdown";
+        countdown.dataset.k2Remaining = String(appliance.remainingSeconds);
+        countdown.dataset.checkedAt = appliance.checkedAt || "";
+        countdown.textContent = "~" + formatPrinterDuration(appliance.remainingSeconds) + " left";
+        wrapper.appendChild(countdown);
+      }
+      const percent = document.createElement("span");
+      percent.className = "printer-progress-label";
+      percent.textContent = Math.round(Number(appliance.progress) || 0) + "%";
+      wrapper.appendChild(percent);
+      return wrapper;
+    }
 
     const bars = document.createElement("div");
     bars.className = "printer-ink-bars";
@@ -2099,7 +2229,13 @@
         return;
       }
       if (window.Hls && window.Hls.isSupported()) {
-        const player = new window.Hls({ liveSyncDurationCount: 2 });
+        const player = new window.Hls({
+          liveSyncDurationCount: 1,
+          liveMaxLatencyDurationCount: 3,
+          maxLiveSyncPlaybackRate: 1.5,
+          maxBufferLength: 4,
+          backBufferLength: 2,
+        });
         player.on(window.Hls.Events.ERROR, function (event, data) {
           if (data && data.fatal) {
             repairIpCameraTileLiveView(id, Number(cameraId), video, preview, fallback, "Live feed error. Repairing...");
@@ -2301,8 +2437,28 @@
   function renderDeviceDetail(device) {
     const deviceState = state.states.get(device.id) || { status: "loading", isOn: null, error: "" };
     const content = elements.deviceDetailContent;
+    const currentCameraFrame = content.querySelector(".printer-camera-frame");
+    if (currentCameraFrame && isK2Printer(device)) {
+      state.printerCameraFrame = currentCameraFrame;
+      currentCameraFrame.remove();
+    }
     updateDeviceIconElement(elements.deviceDetailIcon, device, deviceState, "detail-device-icon");
     content.innerHTML = "";
+
+    if (isTuyaClimate(device, deviceState)) {
+      const shell = document.createElement("section");
+      shell.className = "tuya-climate-detail";
+      shell.appendChild(renderTuyaClimateControl(device, deviceState, true));
+      content.appendChild(shell);
+      appendAdminDeviceInfo(content, device);
+      if (deviceState.error) {
+        const error = document.createElement("p");
+        error.className = "device-error detail-error";
+        error.textContent = deviceState.error;
+        content.appendChild(error);
+      }
+      return;
+    }
 
     if (device.brand === "smartthings" && deviceState.appliance?.type === "refrigerator") {
       renderRefrigeratorDetail(device, deviceState, content);
@@ -2899,7 +3055,7 @@
     if (!raw.camera_id) return;
     const url = "/api/cameras/" + raw.camera_id + "/live/index.m3u8";
     if (video.canPlayType("application/vnd.apple.mpegurl")) { video.src = url; }
-    else if (window.Hls && window.Hls.isSupported()) { const player = new window.Hls({liveSyncDurationCount:2}); player.loadSource(url); player.attachMedia(video); }
+    else if (window.Hls && window.Hls.isSupported()) { const player = new window.Hls({liveSyncDurationCount:1, liveMaxLatencyDurationCount:3, maxLiveSyncPlaybackRate:1.5, maxBufferLength:4, backBufferLength:2}); player.loadSource(url); player.attachMedia(video); }
   }
 
   function renderRingHero(deviceState, raw) {
@@ -3026,7 +3182,18 @@
     const shell = document.createElement("section");
     shell.className = "printer-detail-screen";
     shell.appendChild(renderPrinterHero(deviceState, appliance));
-    shell.appendChild(renderPrinterInkCard(device, appliance));
+    if (appliance.type === "3d-printer") {
+      const overview = document.createElement("div");
+      overview.className = "k2-overview";
+      overview.appendChild(render3dPrinterCameraCard(appliance));
+      overview.appendChild(render3dPrinterJobCard(appliance, deviceState));
+      shell.appendChild(overview);
+      if (appliance.cfs) shell.appendChild(render3dPrinterCfsCard(appliance.cfs));
+      shell.appendChild(render3dPrinterControlsCard(appliance, deviceState));
+      shell.appendChild(render3dPrinterDiagnosticsCard(device, appliance));
+    } else {
+      shell.appendChild(renderPrinterInkCard(device, appliance));
+    }
     shell.appendChild(renderPrinterInfoCard(device, appliance, raw));
     if (Array.isArray(appliance.media) && appliance.media.length) {
       shell.appendChild(renderPrinterMediaCard(appliance.media));
@@ -3045,11 +3212,16 @@
   function renderPrinterHero(deviceState, appliance) {
     const hero = document.createElement("div");
     hero.className = "printer-hero";
-    [
+    const metrics = appliance.type === "3d-printer" ? [
+      ["Status", appliance.stale ? "Offline" : appliance.status || "Idle"],
+      ["Progress", Math.round(Number(appliance.progress) || 0) + "%"],
+      ["Layer", appliance.layer !== null && appliance.layer !== undefined ? appliance.layer + (appliance.totalLayers ? " / " + appliance.totalLayers : "") : "--"]
+    ] : [
       ["Status", appliance.stale ? "Offline" : appliance.status || (deviceState.isOn ? "Online" : "Offline")],
       [appliance.supplyMetricLabel || "Lowest supply", appliance.lowestInkPercent !== null && appliance.lowestInkPercent !== undefined ? appliance.lowestInkPercent + "%" : "--"],
       ["Supplies", Array.isArray(appliance.inkLevels) ? appliance.inkLevels.length : "--"]
-    ].forEach(function (item) {
+    ];
+    metrics.forEach(function (item) {
       const metric = document.createElement("div");
       metric.innerHTML = "<span></span><strong></strong>";
       metric.querySelector("span").textContent = item[0];
@@ -3057,6 +3229,198 @@
       hero.appendChild(metric);
     });
     return hero;
+  }
+
+  function render3dPrinterCameraCard(appliance) {
+    const card = document.createElement("div");
+    card.className = "fridge-card appliance-status-card printer-camera-card";
+    card.appendChild(sectionTitle("Live camera"));
+    if (!appliance.cameraUrl) {
+      const note = document.createElement("p");
+      note.className = "detail-muted";
+      note.textContent = "Add a camera viewer URL in this printer's settings.";
+      card.appendChild(note);
+      return card;
+    }
+    const frame = state.printerCameraFrame && state.printerCameraFrame.getAttribute("src") === appliance.cameraUrl
+      ? state.printerCameraFrame : document.createElement("iframe");
+    frame.className = "printer-camera-frame";
+    frame.src = appliance.cameraUrl;
+    frame.title = "Creality K2 Pro live camera";
+    frame.allow = "autoplay; camera; fullscreen";
+    card.appendChild(frame);
+    state.printerCameraFrame = frame;
+    const link = document.createElement("a");
+    link.className = "secondary-button printer-camera-link";
+    link.href = appliance.cameraUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Open camera viewer";
+    card.appendChild(link);
+    return card;
+  }
+
+  function render3dPrinterJobCard(appliance, deviceState) {
+    const temps = appliance.temperatures || {};
+    const fans = appliance.fans || {};
+    const stale = isK2StatusStale(appliance, deviceState);
+    const card = renderApplianceSettingsCard("Current print", [
+      ["Project", appliance.currentProject || "No active print"],
+      ["Status", stale ? "Last known: " + (appliance.status || "Unknown") : appliance.status],
+      ["Progress", Math.round(Number(appliance.progress) || 0), "%"],
+      ["Layer", appliance.layer !== null && appliance.layer !== undefined ? appliance.layer + (appliance.totalLayers ? " / " + appliance.totalLayers : "") : null],
+      ["Elapsed", formatPrinterDuration(appliance.elapsedSeconds)],
+      ["Remaining", stale ? "Status not current" : appliance.stateKey === "printing" ? "~" + (formatPrinterDuration(appliance.remainingSeconds) || "--") : null],
+      ["Estimated finish", !stale && appliance.stateKey === "printing" && Number.isFinite(Number(appliance.remainingSeconds)) ? new Date(Date.now() + Number(appliance.remainingSeconds) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null],
+      ["Nozzle", temperaturePair(temps.nozzle, temps.nozzleTarget)],
+      ["Bed", temperaturePair(temps.bed, temps.bedTarget)],
+      ["Chamber", temperaturePair(temps.chamber, temps.chamberTarget)],
+      ["Speed", appliance.speed, appliance.speed !== null && appliance.speed !== undefined ? " mm/s" : ""],
+      ["Fans", "Part " + (fans.part || 0) + "% · Aux " + (fans.auxiliary || 0) + "% · Chamber " + (fans.chamber || 0) + "%"]
+    ]);
+    const age = document.createElement("p");
+    age.className = "detail-muted";
+    age.textContent = appliance.checkedAt ? "Last updated " + formatRelativeTime(appliance.checkedAt) : "No recent printer status";
+    card.appendChild(age);
+    return card;
+  }
+
+  function render3dPrinterControlsCard(appliance, deviceState) {
+    const card = document.createElement("div");
+    card.className = "fridge-card appliance-status-card";
+    card.appendChild(sectionTitle("Printer controls"));
+    const controls = appliance.capabilities?.controls || {};
+    const actions = document.createElement("div");
+    actions.className = "k2-control-actions";
+    [["Pause", "pause"], ["Resume", "resume"], ["Cancel print", "cancel"], ["Light", "light"], ["Speed", "speed"], ["Temperatures", "temperatures"], ["Fans", "fans"]].forEach(function (entry) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = entry[1] === "cancel" ? "danger-button" : "secondary-button";
+      button.textContent = entry[0];
+      button.disabled = isK2StatusStale(appliance, deviceState) || controls[entry[1]]?.available !== true;
+      button.title = controls[entry[1]]?.reason || "Not supported by this printer connection.";
+      actions.appendChild(button);
+    });
+    card.appendChild(actions);
+    const note = document.createElement("p");
+    note.className = "detail-muted";
+    note.textContent = isK2StatusStale(appliance, deviceState)
+      ? "Controls unavailable while printer status is not current."
+      : "Unavailable controls remain disabled until their command and resulting printer state are verified on this K2 Pro firmware.";
+    card.appendChild(note);
+    if (appliance.cameraUrl) {
+      const link = document.createElement("a");
+      link.className = "secondary-button printer-camera-link";
+      link.href = appliance.cameraUrl.replace(/\/camera\.html(?:\?.*)?$/, "/");
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open printer interface";
+      card.appendChild(link);
+    }
+    return card;
+  }
+
+  function render3dPrinterCfsCard(cfs) {
+    const card = document.createElement("div");
+    card.className = "fridge-card appliance-status-card";
+    card.appendChild(sectionTitle("CFS filament"));
+    const grid = document.createElement("div");
+    grid.className = "cfs-spool-grid";
+    (cfs.spools || []).forEach(function (spool) {
+      const item = document.createElement("div");
+      item.className = "cfs-spool" + (spool.selected ? " is-selected" : "") + (!spool.hasMaterial ? " is-empty" : "");
+      item.style.setProperty("--filament-color", spool.color || "#64748b");
+      item.innerHTML = "<span></span><strong></strong><small></small>";
+      item.querySelector("span").textContent = "Slot " + spool.slot;
+      item.querySelector("strong").textContent = spool.hasMaterial ? spool.type || "Filament" : "Empty";
+      item.querySelector("small").textContent = spool.percent !== null && spool.percent !== undefined ? spool.percent + "%" + (spool.rfid ? " · RFID" : "") : spool.selected ? "Loaded" : "";
+      grid.appendChild(item);
+    });
+    card.appendChild(grid);
+    const climate = document.createElement("p");
+    climate.className = "detail-muted";
+    climate.textContent = cfs.connected ? [cfs.temperature !== null ? cfs.temperature + "°C" : null, cfs.humidity !== null ? cfs.humidity + "% humidity" : null].filter(Boolean).join(" · ") || "CFS connected" : "CFS not detected";
+    card.appendChild(climate);
+    return card;
+  }
+
+  function temperaturePair(current, target) {
+    if (current === null || current === undefined) return null;
+    return Math.round(current) + "°C" + (target ? " / " + Math.round(target) + "°C" : "");
+  }
+
+  function formatPrinterDuration(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+    const seconds = Math.max(0, Math.round(Number(value)));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return hours + "h " + String(minutes).padStart(2, "0") + "m";
+  }
+
+  function render3dPrinterDiagnosticsCard(device, appliance) {
+    const diagnostics = appliance.diagnostics || {};
+    const events = appliance.diagnosticEvents || [];
+    const card = document.createElement("div");
+    card.className = "fridge-card appliance-status-card printer-diagnostics-card";
+    card.appendChild(sectionTitle("Restart diagnostics"));
+    const grid = document.createElement("div");
+    grid.className = "appliance-setting-grid";
+    [
+      ["SSH collection", diagnostics.enabled ? diagnostics.error ? "Connection failed" : "Active" : "Not enabled"],
+      ["System uptime", diagnostics.uptimeSeconds !== null && diagnostics.uptimeSeconds !== undefined ? formatPrinterDuration(diagnostics.uptimeSeconds) : null],
+      ["Boot ID", diagnostics.bootId],
+      ["SSH issue", diagnostics.error]
+    ].forEach(function (item) {
+      if (!isBlankValue(item[1])) grid.appendChild(settingPill(item[0], item[1], ""));
+    });
+    card.appendChild(grid);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "secondary-button";
+    toggle.textContent = diagnostics.enabled ? "Disable SSH diagnostics" : "Enable SSH diagnostics";
+    toggle.addEventListener("click", async function () {
+      toggle.disabled = true;
+      try {
+        await requestJson("/devices/" + device.id + "/printer/diagnostics/ssh", {
+          method: "POST",
+          body: JSON.stringify({ enabled: !diagnostics.enabled, username: "root", port: 22 })
+        });
+        showBanner(!diagnostics.enabled ? "SSH restart diagnostics enabled." : "SSH restart diagnostics disabled.", "success");
+        await refreshOneDevice(device.id);
+        renderDeviceDetail(device);
+      } catch (error) {
+        showBanner(error.message || "Could not update SSH diagnostics.", "error");
+      } finally {
+        toggle.disabled = false;
+      }
+    });
+    card.appendChild(toggle);
+    if (events.length) {
+      const list = document.createElement("div");
+      list.className = "printer-diagnostic-events";
+      events.forEach(function (event) {
+        const row = document.createElement("div");
+        row.innerHTML = "<strong></strong><span></span><small></small>";
+        row.querySelector("strong").textContent = humanize(event.eventType);
+        row.querySelector("span").textContent = event.message;
+        row.querySelector("small").textContent = event.createdAt ? new Date(event.createdAt + (event.createdAt.endsWith("Z") ? "" : "Z")).toLocaleString() : "";
+        list.appendChild(row);
+      });
+      card.appendChild(list);
+    } else {
+      const note = document.createElement("p");
+      note.className = "detail-muted";
+      note.textContent = "No disconnects or restarts have been recorded yet.";
+      card.appendChild(note);
+    }
+    if (Array.isArray(diagnostics.recentLogs) && diagnostics.recentLogs.length) {
+      const details = document.createElement("details");
+      details.className = "printer-log-details";
+      details.innerHTML = "<summary>Recent printer system log</summary><pre></pre>";
+      details.querySelector("pre").textContent = diagnostics.recentLogs.join("\n");
+      card.appendChild(details);
+    }
+    return card;
   }
 
   function renderPrinterInkCard(device, appliance) {
@@ -4531,7 +4895,7 @@
     if (applianceType === "thermostat") {
       return "thermostat";
     }
-    if (applianceType === "printer") {
+    if (applianceType === "printer" || applianceType === "3d-printer") {
       return "printer";
     }
 
@@ -4861,6 +5225,270 @@
       const range = attribute.minimum !== undefined || attribute.maximum !== undefined ? " " + [attribute.minimum, attribute.maximum].filter(function (value) { return value !== undefined; }).join("-") : "";
       return [attribute.name, attribute.type, range, options].filter(Boolean).join(":");
     }).join(", ");
+  }
+
+  function renderTuyaClimateControl(device, deviceState, expanded) {
+    const appliance = deviceState.appliance || {};
+    const isOn = deviceState.isOn === true;
+    const busy = deviceState.status === "loading";
+    const target = Number(appliance.targetTemperature);
+    const current = Number(appliance.currentTemperature);
+    const shell = document.createElement("div");
+    shell.className = "tuya-climate " + (expanded ? "is-expanded " : "") + (isOn ? "is-on" : "is-off");
+
+    const hero = document.createElement("div");
+    hero.className = "climate-hero";
+    const dial = document.createElement("div");
+    dial.className = "climate-dial";
+    dial.innerHTML = '<span class="climate-dial-label">Set to</span><strong></strong><small>°C</small>';
+    dial.querySelector("strong").textContent = Number.isFinite(target) ? formatTemperature(target) : "--";
+
+    const tempControls = document.createElement("div");
+    tempControls.className = "climate-temperature-controls";
+    tempControls.appendChild(climateIconButton("−", "Lower temperature", busy || !isOn || !Number.isFinite(target), function () {
+      sendTuyaClimateCommand(device, { target_temperature: Math.max(16, target - 1) }, "Temperature set to " + Math.max(16, target - 1) + "°C.");
+    }));
+    tempControls.appendChild(dial);
+    tempControls.appendChild(climateIconButton("+", "Raise temperature", busy || !isOn || !Number.isFinite(target), function () {
+      sendTuyaClimateCommand(device, { target_temperature: Math.min(30, target + 1) }, "Temperature set to " + Math.min(30, target + 1) + "°C.");
+    }));
+
+    const power = document.createElement("button");
+    power.type = "button";
+    power.className = "climate-power";
+    power.disabled = busy;
+    power.setAttribute("aria-label", isOn ? "Turn air conditioner off" : "Turn air conditioner on");
+    power.title = isOn ? "Turn off" : "Turn on";
+    power.textContent = "⏻";
+    power.addEventListener("click", function () {
+      sendTuyaClimateCommand(device, { power: !isOn }, !isOn ? "Air conditioner turned on." : "Air conditioner turned off.");
+    });
+
+    hero.appendChild(tempControls);
+    hero.appendChild(power);
+    shell.appendChild(hero);
+
+    const room = document.createElement("div");
+    room.className = "climate-room-status";
+    room.innerHTML = '<span>Room</span><strong></strong><span class="climate-running-state"></span>';
+    room.querySelector("strong").textContent = Number.isFinite(current) ? formatTemperature(current) + "°C" : "--";
+    room.querySelector(".climate-running-state").textContent = isOn ? humanize(appliance.mode || "On") : "Powered off";
+    shell.appendChild(room);
+
+    const controls = document.createElement("div");
+    controls.className = "climate-control-groups";
+    controls.appendChild(climateChoiceGroup("Mode", [
+      ["Cool", "cold"], ["Dry", "wet"], ["Fan", "wind"], ["Auto", "auto"], ["Heat", "hot"]
+    ], appliance.mode, busy || !isOn, function (value) {
+      sendTuyaClimateCommand(device, { mode: value }, humanize(value) + " mode selected.");
+    }));
+    controls.appendChild(climateChoiceGroup("Fan", [
+      ["Turbo", "strong"], ["High", "high"], ["M-High", "mid_high"], ["Medium", "mid"],
+      ["M-Low", "mid_low"], ["Low", "low"], ["Quiet", "mute"], ["Auto", "auto"]
+    ], appliance.fanSpeed, busy || !isOn, function (value) {
+      sendTuyaClimateCommand(device, { fan_speed: value }, humanize(value) + " fan selected.");
+    }));
+
+    const verticalSwingOn = String(appliance.verticalSwing || "0") !== "0";
+    controls.appendChild(climateToggleRow("Vertical swing", verticalSwingOn ? "Moving air" : "Fixed direction", verticalSwingOn, busy || !isOn, function () {
+      sendTuyaClimateCommand(device, { vertical_swing: verticalSwingOn ? "0" : "1" }, verticalSwingOn ? "Vertical swing turned off." : "Vertical swing turned on.");
+    }));
+
+    if (expanded) {
+      controls.appendChild(climateSectionLabel("Air flow"));
+      controls.appendChild(climateChoiceGroup("Vertical sweep", [
+        ["Off", "0"], ["Full", "1"], ["Upper", "2"], ["Lower", "3"]
+      ], appliance.verticalSwing, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { vertical_swing: value }, "Vertical sweep updated.");
+      }));
+      controls.appendChild(climateSelectGroup("Horizontal sweep", [
+        ["Off", "0"], ["Full sweep", "1"], ["Left", "2"], ["Center", "3"],
+        ["Right", "4"], ["Left-center", "5"], ["Right-center", "6"], ["Wide", "7"]
+      ], appliance.horizontalSwing, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { horizontal_swing: value }, "Horizontal sweep updated.");
+      }));
+      controls.appendChild(climateSelectGroup("Vertical fixed position", [
+        ["Keep current", "0"], ["Top", "1"], ["Upper-middle", "2"], ["Middle", "3"], ["Lower-middle", "4"], ["Bottom", "5"]
+      ], appliance.verticalAirflow, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { vertical_airflow: value }, "Vertical air direction updated.");
+      }));
+      controls.appendChild(climateSelectGroup("Horizontal fixed position", [
+        ["Keep current", "0"], ["Left", "1"], ["Left-center", "2"], ["Center", "3"], ["Right-center", "4"],
+        ["Right", "5"], ["Wide", "8"], ["Wide-left", "6"], ["Wide-right", "7"]
+      ], appliance.horizontalAirflow, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { horizontal_airflow: value }, "Horizontal air direction updated.");
+      }));
+      controls.appendChild(climateChoiceGroup("Combined swing", [
+        ["Off", "0"], ["Horizontal", "1"], ["Vertical", "2"], ["Both", "3"]
+      ], appliance.combinedSwing, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { combined_swing: value }, "Combined swing updated.");
+      }));
+      controls.appendChild(climateToggleRow("Hot/cool airflow", "Temperature-adaptive air", appliance.temperatureAirflow === true, busy || !isOn, function () {
+        sendTuyaClimateCommand(device, { temperature_airflow: appliance.temperatureAirflow !== true }, "Temperature airflow updated.");
+      }));
+
+      controls.appendChild(climateSectionLabel("Comfort"));
+      controls.appendChild(climateChoiceGroup("Sleep", [
+        ["Off", "off"], ["Standard", "normal"], ["Senior", "old"], ["Child", "child"]
+      ], appliance.sleep, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { sleep: value }, "Sleep profile updated.");
+      }));
+      controls.appendChild(climateToggleRow("Eco", "Reduced-energy operation", appliance.eco === true, busy || !isOn, function () {
+        sendTuyaClimateCommand(device, { eco: appliance.eco !== true }, "Eco setting updated.");
+      }));
+      controls.appendChild(climateToggleRow("Health", "Air-cleaning function", appliance.health === true, busy || !isOn, function () {
+        sendTuyaClimateCommand(device, { health: appliance.health !== true }, "Health setting updated.");
+      }));
+      controls.appendChild(climateToggleRow("Gentle wind", "Softer, indirect airflow", appliance.gentleWind === true, busy || !isOn, function () {
+        sendTuyaClimateCommand(device, { gentle_wind: appliance.gentleWind !== true }, "Gentle wind setting updated.");
+      }));
+
+      controls.appendChild(climateSectionLabel("Energy and GEN mode"));
+      controls.appendChild(climateChoiceGroup("GEN level", [
+        ["Off", "off"], ["L1", "L1"], ["L2", "L2"], ["L3", "L3"]
+      ], appliance.genMode, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { gen_mode: value }, "GEN mode updated.");
+      }));
+      controls.appendChild(climateChoiceGroup("Power limit", [
+        ["1 kW", "1"], ["2 kW", "2"], ["3 kW", "3"], ["4 kW", "4"], ["5 kW", "5"]
+      ], appliance.powerLimit, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { power_limit: value }, "Power limit updated.");
+      }));
+      controls.appendChild(climateSelectGroup("Energy saver plan", [
+        ["Off", "0"], ["Automatic saving", "1"], ["Power-budget saving", "2"], ["Temperature saving", "3"]
+      ], appliance.energySaver, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { energy_saver: value }, "Energy saver plan updated.");
+      }));
+      controls.appendChild(climateSelectGroup("Saver temperature", [
+        ["26°C", "26"], ["27°C", "27"], ["28°C", "28"], ["29°C", "29"], ["30°C", "30"], ["31°C", "31"]
+      ], appliance.energySaverTemperature, busy || !isOn, function (value) {
+        sendTuyaClimateCommand(device, { energy_saver_temperature: Number(value) }, "Energy saver temperature updated.");
+      }));
+    }
+    shell.appendChild(controls);
+    return shell;
+  }
+
+  function climateChoiceGroup(label, options, selected, disabled, onSelect) {
+    const group = document.createElement("div");
+    group.className = "climate-choice-group";
+    const heading = document.createElement("span");
+    heading.className = "climate-control-label";
+    heading.textContent = label;
+    const choices = document.createElement("div");
+    choices.className = "climate-choices";
+    if (options.length > 5) {
+      choices.classList.add("is-many");
+    }
+    options.forEach(function (option) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = option[0];
+      button.dataset.active = String(selected) === option[1] ? "true" : "false";
+      button.disabled = disabled;
+      button.addEventListener("click", function () { onSelect(option[1]); });
+      choices.appendChild(button);
+    });
+    group.appendChild(heading);
+    group.appendChild(choices);
+    return group;
+  }
+
+  function climateSectionLabel(text) {
+    const heading = document.createElement("h4");
+    heading.className = "climate-section-label";
+    heading.textContent = text;
+    return heading;
+  }
+
+  function climateSelectGroup(label, options, selected, disabled, onSelect) {
+    const row = document.createElement("label");
+    row.className = "climate-select-row";
+    const text = document.createElement("span");
+    text.textContent = label;
+    const select = document.createElement("select");
+    select.disabled = disabled;
+    options.forEach(function (option) {
+      const item = document.createElement("option");
+      item.value = option[1];
+      item.textContent = option[0];
+      item.selected = String(selected) === option[1];
+      select.appendChild(item);
+    });
+    select.addEventListener("change", function () { onSelect(select.value); });
+    row.appendChild(text);
+    row.appendChild(select);
+    return row;
+  }
+
+  function climateToggleRow(label, description, active, disabled, onClick) {
+    const row = document.createElement("div");
+    row.className = "climate-swing-row";
+    row.innerHTML = '<div><span></span><strong></strong></div>';
+    row.querySelector("span").textContent = label;
+    row.querySelector("strong").textContent = description;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "climate-switch";
+    button.dataset.active = active ? "true" : "false";
+    button.disabled = disabled;
+    button.setAttribute("aria-label", (active ? "Turn off " : "Turn on ") + label.toLowerCase());
+    button.innerHTML = "<span></span>";
+    button.addEventListener("click", onClick);
+    row.appendChild(button);
+    return row;
+  }
+
+  function climateIconButton(text, label, disabled, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "climate-temp-button";
+    button.textContent = text;
+    button.disabled = disabled;
+    button.setAttribute("aria-label", label);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function formatTemperature(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  }
+
+  async function sendTuyaClimateCommand(device, values, successMessage) {
+    const existing = state.states.get(device.id) || {};
+    state.states.set(device.id, Object.assign({}, existing, { status: "loading", error: "" }));
+    render();
+    if (elements.deviceDetailDialog.open && Number(elements.deviceDetailDialog.dataset.deviceId) === device.id) {
+      renderDeviceDetail(device);
+    }
+    try {
+      const result = await requestJson("/devices/" + device.id + "/tuya/command", {
+        method: "POST",
+        timeoutMs: 9000,
+        body: JSON.stringify(values)
+      });
+      state.states.set(device.id, checkedDeviceState({
+        status: stateStatus(device, result),
+        isOn: result.is_on,
+        isOpen: result.is_open,
+        luminance: result.luminance,
+        appliance: result.appliance,
+        raw: result.raw,
+        error: ""
+      }));
+      showBanner(successMessage || "Air conditioner updated.", "success");
+    } catch (error) {
+      state.states.set(device.id, checkedDeviceState(Object.assign({}, existing, {
+        status: "error",
+        error: error.message || "Air conditioner command failed"
+      })));
+      showBanner(error.message || "Air conditioner command failed.", "error");
+    } finally {
+      render();
+      if (elements.deviceDetailDialog.open && Number(elements.deviceDetailDialog.dataset.deviceId) === device.id) {
+        renderDeviceDetail(device);
+      }
+    }
   }
 
   function renderAppliance(appliance) {
@@ -6538,6 +7166,52 @@
 
   function isPrinter(device) {
     return device.brand === "printer";
+  }
+
+  function isK2Printer(device) {
+    return isPrinter(device) && /k2\s*pro/i.test([device.name, device.model, device.device_type].join(" "));
+  }
+
+  function isK2StatusStale(appliance, deviceState) {
+    const checked = Date.parse(appliance.checkedAt || "");
+    return Boolean(appliance.stale || deviceState.status === "error" || !Number.isFinite(checked) || Date.now() - checked > 25000);
+  }
+
+  async function refreshK2Device(device) {
+    if (!device || state.k2Refreshes.has(device.id) || document.hidden) return;
+    state.k2Refreshes.add(device.id);
+    try {
+      const result = await requestJson("/devices/" + device.id + "/state", { timeoutMs: printerStateRefreshTimeoutMs });
+      state.states.set(device.id, checkedDeviceState({
+        status: stateStatus(device, result), isOn: result.is_on,
+        isOpen: result.is_open, luminance: result.luminance,
+        appliance: result.appliance, raw: result.raw, error: ""
+      }));
+      render();
+      if (elements.deviceDetailDialog.open && Number(elements.deviceDetailDialog.dataset.deviceId) === device.id) renderDeviceDetail(device);
+    } catch (error) {
+      const previous = state.states.get(device.id);
+      if (previous?.appliance) {
+        previous.appliance.stale = true;
+        previous.error = error.message || "Printer status unavailable";
+        render();
+      }
+    } finally {
+      state.k2Refreshes.delete(device.id);
+    }
+  }
+
+  function updateK2Countdowns() {
+    document.querySelectorAll("[data-k2-remaining]").forEach(function (node) {
+      const checked = Date.parse(node.dataset.checkedAt || "");
+      const initial = Number(node.dataset.k2Remaining);
+      if (!Number.isFinite(checked) || Date.now() - checked > 25000 || !Number.isFinite(initial)) {
+        node.textContent = "Status not current";
+        return;
+      }
+      const left = Math.max(0, initial - Math.floor((Date.now() - checked) / 1000));
+      node.textContent = "~" + formatPrinterDuration(left) + " left";
+    });
   }
 
   function deviceText(device) {

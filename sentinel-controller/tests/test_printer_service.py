@@ -1,11 +1,104 @@
+import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import json
 
 from app import printer_service
 
 
 class PrinterServiceTests(unittest.TestCase):
+    def test_missing_net_snmp_uses_python_client(self):
+        device = type("Device", (), {"host": "192.0.2.1", "device_key": None})()
+        with patch.object(printer_service.subprocess, "run", side_effect=FileNotFoundError), patch.object(
+            printer_service, "_run_python_snmp", new_callable=AsyncMock, return_value="SNMP result"
+        ) as fallback:
+            self.assertEqual(printer_service._run_snmp_sync(device, "1.3.6", "snmpget"), "SNMP result")
+        fallback.assert_awaited_once_with(device, "1.3.6", "snmpget")
+
+    def test_python_snmp_returns_numeric_oids_and_retries_v1(self):
+        from pysnmp.hlapi.v1arch import asyncio as snmp
+        from pysnmp.proto import errind
+        from pysnmp.proto.rfc1902 import ObjectName, OctetString
+        from unittest.mock import MagicMock
+        device = type("Device", (), {"host": "192.0.2.1", "device_key": None})()
+        response = (None, 0, 0, [(ObjectName(printer_service.OID_SYS_DESCR), OctetString("Canon printer"))])
+        dispatcher = MagicMock()
+        with patch.object(snmp, "SnmpDispatcher", return_value=dispatcher), patch.object(
+            snmp.UdpTransportTarget, "create", new_callable=AsyncMock
+        ), patch.object(snmp, "get_cmd", new_callable=AsyncMock,
+                        side_effect=[(errind.requestTimedOut, 0, 0, []), response]) as get:
+            output = asyncio.run(printer_service._run_python_snmp(device, printer_service.OID_SYS_DESCR, "snmpget"))
+        self.assertEqual(printer_service.parse_snmp_output(output)[printer_service.OID_SYS_DESCR].value, "Canon printer")
+        self.assertEqual(get.await_count, 2)
+        self.assertEqual(dispatcher.close.call_count, 2)
+
+    def test_k2_print_state_maps_active_and_paused_jobs(self):
+        self.assertEqual(
+            printer_service._k2_print_state({"printFileName": "benchy.gcode", "state": 1, "printProgress": 42}),
+            ("Printing", "printing"),
+        )
+        self.assertEqual(
+            printer_service._k2_print_state({"printFileName": "benchy.gcode", "state": 5, "printProgress": 42}),
+            ("Paused", "paused"),
+        )
+
+    def test_k2_cfs_status_includes_color_material_and_selected_slot(self):
+        cfs = printer_service._k2_cfs_status([{
+            "materialBoxs": [{
+                "id": 1,
+                "state": 1,
+                "temp": 27,
+                "humidity": 39,
+                "materials": [
+                    {"state": 2, "selected": 1, "type": "PLA", "color": "#FF5500", "percent": 73},
+                    {"state": 0, "selected": 0, "type": "", "color": ""},
+                ],
+            }],
+        }])
+
+        self.assertTrue(cfs["connected"])
+        self.assertEqual(cfs["temperature"], 27)
+        self.assertEqual(cfs["humidity"], 39)
+        self.assertEqual(cfs["spools"][0]["type"], "PLA")
+        self.assertEqual(cfs["spools"][0]["color"], "#FF5500")
+        self.assertTrue(cfs["spools"][0]["selected"])
+        self.assertTrue(cfs["spools"][0]["rfid"])
+        self.assertFalse(cfs["spools"][1]["hasMaterial"])
+
+    def test_k2_detection_accepts_device_type_and_model(self):
+        device = type("Device", (), {
+            "name": "Workshop printer", "model": "Creality K2 Pro",
+            "device_type": "3d-printer", "brand": "printer",
+        })()
+        self.assertTrue(printer_service._is_creality_k2(device))
+
+    def test_k2_filament_color_normalizes_creality_values(self):
+        self.assertEqual(printer_service._k2_filament_color("#0FF5500"), "#FF5500")
+        self.assertEqual(printer_service._k2_filament_color("12abef"), "#12abef")
+        self.assertEqual(printer_service._k2_filament_color("unknown"), "#64748b")
+
+    def test_k2_offline_status_keeps_3d_printer_layout(self):
+        device = type("Device", (), {
+            "name": "K2 Pro", "model": "Creality K2 Pro", "host": "10.0.0.8",
+            "device_type": "3d-printer", "brand": "printer",
+        })()
+        status = printer_service.offline_status(device, {"appliance": {"currentProject": "part.gcode"}}, "Disconnected")
+        self.assertEqual(status["appliance"]["type"], "3d-printer")
+        self.assertEqual(status["appliance"]["currentProject"], "part.gcode")
+        self.assertEqual(status["raw"]["source"], "creality-k2-websocket")
+
+    def test_k2_capabilities_expose_monitoring_but_gate_unverified_controls(self):
+        capabilities = printer_service.k2_capabilities({
+            "state": 1, "printProgress": 25, "printLeftTime": 300,
+            "nozzleTemp": 220, "bedTemp0": 50, "modelFanPct": 100,
+            "cfsConnect": 1, "webrtcSupport": 1,
+        })
+        self.assertTrue(capabilities["monitoring"]["job"])
+        self.assertTrue(capabilities["monitoring"]["eta"])
+        self.assertTrue(capabilities["monitoring"]["camera"])
+        self.assertFalse(capabilities["controls"]["pause"]["available"])
+        self.assertIn("verification", capabilities["controls"]["pause"]["reason"].lower())
+
     def test_supplies_from_snmp_rows_calculates_percent_and_status(self):
         rows = printer_service.parse_snmp_output(
             """
@@ -440,6 +533,26 @@ class PrinterServiceTests(unittest.TestCase):
 
         self.assertEqual(candidates[0]["host"], "10.1.1.20")
         self.assertEqual(candidates[0]["source"], "direct")
+
+    def test_k2_discovery_probe_identifies_telemetry(self):
+        status = {
+            "appliance": {
+                "status": "Printing", "systemName": "K2Pro-1234",
+                "currentProject": "part.gcode", "progress": 35,
+                "cfs": {"connected": True},
+            },
+            "raw": {"telemetry": {"nozzleTemp": "220.0", "printProgress": 35}},
+        }
+        with patch("app.printer_service._get_creality_k2_status", new=AsyncMock(return_value=status)):
+            candidate = asyncio.run(printer_service._probe_creality_k2_candidate("192.168.1.50"))
+
+        self.assertEqual(candidate["name"], "K2Pro-1234")
+        self.assertEqual(candidate["model"], "Creality K2 Pro")
+        self.assertTrue(candidate["k2_supported"])
+        self.assertTrue(candidate["cfs_connected"])
+
+    def test_network_scan_includes_k2_control_port(self):
+        self.assertIn(printer_service.K2_WEBSOCKET_PORT, printer_service.DISCOVERY_PORTS)
 
 
 if __name__ == "__main__":

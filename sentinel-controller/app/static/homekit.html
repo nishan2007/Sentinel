@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apple Home · Sentinel</title>
+  <link rel="stylesheet" href="/static/homekit.css">
+</head>
+<body>
+  <main>
+    <nav><a href="/dashboard">← Sentinel dashboard</a></nav>
+    <header>
+      <div><p class="eyebrow">Sentinel integration</p><h1>Apple Home</h1></div>
+      <span id="statusBadge" class="badge">Loading…</span>
+    </header>
+
+    <section class="card setup-grid">
+      <div>
+        <h2>Sentinel Bridge</h2>
+        <p class="muted">Pair this bridge once to make selected Sentinel devices available in the Home app.</p>
+        <label class="toggle"><input id="enabled" type="checkbox"><span>Enable Apple Home bridge</span></label>
+        <label>Bridge name<input id="bridgeName" maxlength="64"></label>
+        <label>Network port<input id="port" type="number" min="1024" max="65535"></label>
+        <div class="actions"><button id="save" class="primary">Save & restart</button><button id="restart">Restart bridge</button></div>
+      </div>
+      <div id="pairing" class="pairing" hidden>
+        <h2>Add to the Home app</h2>
+        <img id="qr" alt="Apple Home pairing QR code">
+        <p>Manual code: <strong id="pin"></strong></p>
+      </div>
+      <div id="paired" class="paired" hidden>
+        <h2>Paired</h2><p>This bridge is connected to an Apple Home.</p>
+        <button id="reset" class="danger">Reset pairing</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-heading"><div><h2>Devices</h2><p class="muted">Turn off devices that are already exposed by another bridge to avoid duplicates.</p></div><span id="count"></span></div>
+      <div id="devices" class="device-list"></div>
+    </section>
+    <p id="message" role="status"></p>
+  </main>
+  <script src="/static/homekit.js"></script>
+</body>
+</html>

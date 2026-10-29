@@ -95,6 +95,19 @@ async def get_camera_by_device(device_id: int, *, include_secrets: bool = False)
     return dict(row) if include_secrets else _camera_out(row)
 
 
+async def get_camera_by_host(host: str, *, include_secrets: bool = False) -> dict | None:
+    async with db.connection_context() as conn:
+        cursor = await conn.execute(
+            """SELECT cp.*, d.name, d.host, d.model FROM camera_profiles cp
+               JOIN devices d ON d.id = cp.device_id
+               WHERE lower(trim(d.host)) = lower(trim(?)) LIMIT 1""", (host,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return dict(row) if include_secrets else _camera_out(row)
+
+
 async def create_camera(device_id: int, payload: dict) -> dict:
     async with db.connection_context() as conn:
         cursor = await conn.execute(

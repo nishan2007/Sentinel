@@ -4,7 +4,11 @@ pydantic
 python-dotenv
 meross-iot
 aiosqlite
+tinytuya
 ring-doorbell
 yalexs
 onvif-zeep
 WSDiscovery
+HAP-python[QRCode]>=4.9,<5
+websockets>=15
+pysnmp>=7.1,<8

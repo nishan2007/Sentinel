@@ -63,7 +63,7 @@ DISCOVERY_SERVICE_TYPES = (
     "_canon-bjnp3._tcp",
     "_canon-bjnp4._tcp",
 )
-DISCOVERY_PORTS = (9100, 631, 8611, 8612, 8613, 8614)
+DISCOVERY_PORTS = (9999, 9100, 631, 8611, 8612, 8613, 8614)
 
 
 class PrinterServiceError(Exception):
@@ -88,6 +88,11 @@ class PrinterSnmpUnavailableError(PrinterServiceError):
 
 class PrinterUnsupportedError(PrinterServiceError):
     status_code = 422
+
+
+K2_WEBSOCKET_PORT = 9999
+K2_STATUS_TIMEOUT_SECONDS = 4
+_k2_ssh_cache: dict[int, tuple[float, dict[str, Any]]] = {}
 
 
 @dataclass(frozen=True)
@@ -192,8 +197,8 @@ def _run_snmp_sync(device: Device, oid: str, tool: str = "snmpwalk") -> str:
                 timeout=float(config["timeout"]) + 2,
                 check=False,
             )
-        except FileNotFoundError as exc:
-            raise PrinterSnmpUnavailableError("SNMP tools are not installed on this Sentinel machine.") from exc
+        except FileNotFoundError:
+            return asyncio.run(_run_python_snmp(device, oid, tool))
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
             if isinstance(stdout, bytes):
@@ -218,6 +223,67 @@ def _run_snmp_sync(device: Device, oid: str, tool: str = "snmpwalk") -> str:
     if last_timeout:
         raise PrinterTimeoutError("Printer did not respond to SNMP.")
     raise PrinterServiceError("Printer SNMP status check failed.")
+
+
+async def _run_python_snmp(device: Device, oid: str, tool: str) -> str:
+    """Use the bundled Python client when Net-SNMP programs are unavailable."""
+    try:
+        from pysnmp.hlapi.v1arch.asyncio import (
+            CommunityData, ObjectIdentity, ObjectType, SnmpDispatcher,
+            UdpTransportTarget, get_cmd, walk_cmd,
+        )
+        from pysnmp.proto import errind
+        from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchInstance, NoSuchObject
+    except ImportError as exc:
+        raise PrinterSnmpUnavailableError(
+            "SNMP support is missing. Install Sentinel requirements and restart Sentinel."
+        ) from exc
+
+    config = _config(device)
+    versions = [str(config["version"])] if config.get("version") else ["2c", "1"]
+    for version in versions:
+        if version not in ("1", "2c"):
+            raise PrinterUnsupportedError("Printer SNMP version must be 1 or 2c.")
+        dispatcher = SnmpDispatcher()
+        lines: list[str] = []
+
+        def collect(result):
+            error, status, index, bindings = result
+            if error:
+                if isinstance(error, errind.RequestTimedOut):
+                    raise PrinterTimeoutError("Printer did not respond to SNMP.")
+                raise PrinterServiceError(str(error))
+            if status:
+                raise PrinterServiceError(f"Printer SNMP error: {status.prettyPrint()}")
+            for name, value in bindings:
+                if isinstance(value, (EndOfMibView, NoSuchInstance, NoSuchObject)):
+                    continue
+                # JSON quoting keeps multiline strings within one parser row.
+                rendered = value.prettyPrint()
+                if hasattr(value, "asOctets"):
+                    rendered = json.dumps(rendered, ensure_ascii=False)
+                numeric_oid = ".".join(str(part) for part in name)
+                lines.append(f"{numeric_oid} = {type(value).__name__}: {rendered}")
+
+        try:
+            target = await UdpTransportTarget.create(
+                (_host(device), 161), timeout=float(config["timeout"]), retries=int(config["retries"])
+            )
+            args = (dispatcher, CommunityData(str(config["community"]), mpModel=0 if version == "1" else 1),
+                    target, ObjectType(ObjectIdentity(oid)))
+            async with asyncio.timeout((float(config["timeout"]) * (int(config["retries"]) + 1)) + 2):
+                if tool == "snmpget":
+                    collect(await get_cmd(*args))
+                else:
+                    async for result in walk_cmd(*args, lexicographicMode=False, maxRows=2048):
+                        collect(result)
+            return "\n".join(lines)
+        except (PrinterTimeoutError, TimeoutError):
+            if lines:
+                return "\n".join(lines)
+        finally:
+            dispatcher.close()
+    raise PrinterTimeoutError("Printer did not respond to SNMP.")
 
 
 async def _snmp_walk(device: Device, oid: str) -> dict[str, SnmpRow]:
@@ -637,7 +703,7 @@ def build_status(device: Device, rows: dict[str, SnmpRow], checked_at: str | Non
 def offline_status(device: Device, cached_state: dict[str, Any] | None, message: str, checked_at: str | None = None) -> dict[str, Any]:
     cached_appliance = dict((cached_state or {}).get("appliance") or {})
     cached_appliance.update({
-        "type": "printer",
+        "type": "3d-printer" if _is_creality_k2(device) else "printer",
         "title": cached_appliance.get("title") or "Printer status",
         "status": "Offline",
         "message": message,
@@ -651,7 +717,7 @@ def offline_status(device: Device, cached_state: dict[str, Any] | None, message:
         "is_on": False,
         "appliance": cached_appliance,
         "raw": {
-            "source": "snmp",
+            "source": "creality-k2-websocket" if _is_creality_k2(device) else "snmp",
             "host": device.host,
             "error": message,
             "stale": True,
@@ -660,6 +726,8 @@ def offline_status(device: Device, cached_state: dict[str, Any] | None, message:
 
 
 async def get_status(device: Device, checked_at: str | None = None) -> dict[str, Any]:
+    if _is_creality_k2(device):
+        return await _get_creality_k2_status(device, checked_at)
     rows: dict[str, SnmpRow] = {}
     try:
         rows.update(await _snmp_get(device, OID_SYS_DESCR))
@@ -689,6 +757,268 @@ async def get_status(device: Device, checked_at: str | None = None) -> dict[str,
 
 def _is_magicard(device: Device) -> bool:
     return "magicard" in " ".join(str(value or "") for value in (device.name, device.model)).lower()
+
+
+def _is_creality_k2(device: Device) -> bool:
+    identity = " ".join(str(value or "") for value in (
+        getattr(device, "name", None), getattr(device, "model", None),
+        getattr(device, "device_type", None), getattr(device, "brand", None),
+    )).lower()
+    return "k2 pro" in identity or "k2pro" in identity or (
+        "creality" in identity and "k2" in identity
+    )
+
+
+def _number(value: Any, default: float | int | None = None) -> float | int | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return int(number) if number.is_integer() else number
+
+
+def _k2_print_state(data: dict[str, Any]) -> tuple[str, str]:
+    error = data.get("err") if isinstance(data.get("err"), dict) else {}
+    if _number(error.get("errcode"), 0):
+        return "Error", "error"
+    filename = str(data.get("printFileName") or "").strip()
+    progress = _number(data.get("printProgress", data.get("dProgress")), 0) or 0
+    raw_state = _number(data.get("state"), -1)
+    if filename and progress >= 100:
+        return "Completed", "completed"
+    if filename and raw_state == 5:
+        return "Paused", "paused"
+    if filename and raw_state == 4:
+        return "Stopped", "stopped"
+    if filename and raw_state == 1:
+        return "Printing", "printing"
+    if filename and raw_state == 0:
+        return "Processing", "processing"
+    return "Idle", "idle"
+
+
+def _find_k2_material_boxes(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        for key in ("materialBoxs", "materialBoxes", "boxsInfo"):
+            candidate = value.get(key)
+            if isinstance(candidate, list):
+                return [item for item in candidate if isinstance(item, dict)]
+        for candidate in value.values():
+            found = _find_k2_material_boxes(candidate)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _find_k2_material_boxes(candidate)
+            if found:
+                return found
+    return []
+
+
+def _k2_filament_color(value: Any) -> str:
+    color = str(value or "").strip()
+    if color.startswith("#0") and len(color) > 7:
+        color = "#" + color[2:]
+    elif re.fullmatch(r"[0-9A-Fa-f]{6}", color):
+        color = "#" + color
+    return color if re.fullmatch(r"#[0-9A-Fa-f]{6}", color) else "#64748b"
+
+
+def _k2_cfs_status(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    boxes: list[dict[str, Any]] = []
+    for message in reversed(messages):
+        boxes = _find_k2_material_boxes(message)
+        if boxes:
+            break
+    spools: list[dict[str, Any]] = []
+    for box in boxes:
+        for index, material in enumerate(box.get("materials") or []):
+            if not isinstance(material, dict):
+                continue
+            state = int(_number(material.get("state"), 0) or 0)
+            spools.append({
+                "id": material.get("id", index + 1),
+                "boxId": box.get("id"),
+                "slot": index + 1,
+                "type": material.get("type") or material.get("material") or "Unknown",
+                "color": _k2_filament_color(material.get("color")),
+                "percent": _number(material.get("percent")),
+                "selected": int(_number(material.get("selected"), 0) or 0) == 1,
+                "hasMaterial": state != 0,
+                "rfid": state == 2,
+            })
+    primary = boxes[0] if boxes else {}
+    return {
+        "connected": bool(boxes),
+        "temperature": _number(primary.get("temp")),
+        "humidity": _number(primary.get("humidity")),
+        "spools": spools,
+    }
+
+
+def k2_capabilities(telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Describe only capabilities Sentinel can safely expose for this printer.
+
+    The K2 protocol advertises control-shaped fields, but firmware acceptance is
+    not proof that a command took effect. Controls remain unavailable until an
+    explicit on-device verification records their command/response behavior.
+    """
+    data = telemetry or {}
+    return {
+        "monitoring": {
+            "job": all(key in data for key in ("state", "printProgress")),
+            "eta": "printLeftTime" in data,
+            "temperatures": "nozzleTemp" in data and "bedTemp0" in data,
+            "fans": any(key in data for key in ("modelFanPct", "auxiliaryFanPct", "caseFanPct")),
+            "cfs": bool(data.get("cfsConnect")),
+            "camera": bool(data.get("video") or data.get("video1") or data.get("webrtcSupport")),
+        },
+        "controls": {
+            name: {"available": False, "reason": "Requires verification on this K2 Pro firmware."}
+            for name in ("pause", "resume", "cancel", "light", "speed", "temperatures", "fans")
+        },
+    }
+
+
+def _k2_ssh_diagnostics_sync(device: Device) -> dict[str, Any]:
+    config = _device_key_json(device)
+    if not config.get("ssh_diagnostics"):
+        return {"enabled": False}
+    username = str(config.get("ssh_username") or "root")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
+        return {"enabled": True, "error": "Invalid SSH username."}
+    port = int(config.get("ssh_port") or 22)
+    if port < 1 or port > 65535:
+        return {"enabled": True, "error": "Invalid SSH port."}
+    command = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+        "-o", "StrictHostKeyChecking=accept-new", "-p", str(port),
+        f"{username}@{_host(device).split(':', 1)[0]}",
+        "cat /proc/uptime; echo __SENTINEL_BOOT__; cat /proc/sys/kernel/random/boot_id 2>/dev/null; echo __SENTINEL_LOG__; logread 2>/dev/null | tail -n 80",
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=6, check=False)
+    except FileNotFoundError:
+        return {"enabled": True, "error": "OpenSSH client is not installed on the Sentinel machine."}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"enabled": True, "error": f"SSH diagnostics failed: {exc}"}
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "SSH connection failed.").strip()
+        return {"enabled": True, "error": message[-500:]}
+    uptime_text, separator, remainder = completed.stdout.partition("__SENTINEL_BOOT__")
+    boot_text, _, logs = remainder.partition("__SENTINEL_LOG__") if separator else ("", "", "")
+    uptime = _number(uptime_text.strip().split()[0] if uptime_text.strip() else None)
+    return {
+        "enabled": True,
+        "uptimeSeconds": uptime,
+        "bootId": boot_text.strip() or None,
+        "recentLogs": [line for line in logs.strip().splitlines()[-80:] if line.strip()],
+    }
+
+
+async def _k2_ssh_diagnostics(device: Device) -> dict[str, Any]:
+    now = asyncio.get_running_loop().time()
+    cached = _k2_ssh_cache.get(device.id)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    result = await asyncio.to_thread(_k2_ssh_diagnostics_sync, device)
+    _k2_ssh_cache[device.id] = (now, result)
+    return result
+
+
+async def _get_creality_k2_status(device: Device, checked_at: str | None = None) -> dict[str, Any]:
+    try:
+        import websockets
+    except ImportError as exc:
+        raise PrinterServiceError("Creality K2 support requires the websockets package. Reinstall Sentinel requirements.") from exc
+    host = _host(device).split(":", 1)[0]
+    messages: list[dict[str, Any]] = []
+    try:
+        async with websockets.connect(
+            f"ws://{host}:{K2_WEBSOCKET_PORT}",
+            open_timeout=K2_STATUS_TIMEOUT_SECONDS,
+            close_timeout=1,
+            proxy=None,
+        ) as socket:
+            await socket.send(json.dumps({"method": "get", "params": {"boxsInfo": 1}}))
+            deadline = asyncio.get_running_loop().time() + K2_STATUS_TIMEOUT_SECONDS
+            while asyncio.get_running_loop().time() < deadline and len(messages) < 8:
+                try:
+                    payload = await asyncio.wait_for(socket.recv(), timeout=0.8)
+                except asyncio.TimeoutError:
+                    if messages:
+                        break
+                    continue
+                if not isinstance(payload, str) or payload == "ok":
+                    continue
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    messages.append(parsed)
+    except TimeoutError as exc:
+        raise PrinterTimeoutError("Creality K2 Pro did not respond on port 9999.") from exc
+    except (OSError, websockets.WebSocketException) as exc:
+        raise PrinterServiceError(f"Could not connect to the Creality K2 Pro: {exc}") from exc
+
+    if not messages:
+        raise PrinterUnsupportedError("Creality K2 Pro connected but returned no status data.")
+    telemetry: dict[str, Any] = {}
+    for message in messages:
+        telemetry.update({key: value for key, value in message.items() if key not in {"materialBoxs", "materialBoxes", "boxsInfo"}})
+    status, state_key = _k2_print_state(telemetry)
+    config = _device_key_json(device)
+    camera_url = str(config.get("camera_url") or f"http://{host}:4408/camera.html")
+    progress = _number(telemetry.get("printProgress", telemetry.get("dProgress")), 0)
+    cfs = _k2_cfs_status(messages)
+    diagnostics = await _k2_ssh_diagnostics(device)
+    filename = str(telemetry.get("printFileName") or "").replace("\\", "/").split("/")[-1]
+    error = telemetry.get("err") if isinstance(telemetry.get("err"), dict) else {}
+    appliance = {
+        "type": "3d-printer",
+        "title": "3D printer status",
+        "status": status,
+        "stateKey": state_key,
+        "message": error.get("value") or "",
+        "model": device.model or "Creality K2 Pro",
+        "systemName": telemetry.get("hostname"),
+        "firmware": telemetry.get("modelVersion"),
+        "currentProject": filename or None,
+        "progress": progress,
+        "layer": _number(telemetry.get("layer")),
+        "totalLayers": _number(telemetry.get("TotalLayer")),
+        "elapsedSeconds": _number(telemetry.get("printJobTime")),
+        "remainingSeconds": _number(telemetry.get("printLeftTime")),
+        "temperatures": {
+            "nozzle": _number(telemetry.get("nozzleTemp")),
+            "nozzleTarget": _number(telemetry.get("targetNozzleTemp")),
+            "bed": _number(telemetry.get("bedTemp0")),
+            "bedTarget": _number(telemetry.get("targetBedTemp0")),
+            "chamber": _number(telemetry.get("boxTemp")),
+            "chamberTarget": _number(telemetry.get("targetBoxTemp")),
+        },
+        "fans": {
+            "part": _number(telemetry.get("modelFanPct"), 0),
+            "auxiliary": _number(telemetry.get("auxiliaryFanPct"), 0),
+            "chamber": _number(telemetry.get("caseFanPct"), 0),
+        },
+        "speed": _number(telemetry.get("realTimeSpeed")),
+        "cfs": cfs,
+        "cameraUrl": camera_url,
+        "diagnostics": diagnostics,
+        "capabilities": k2_capabilities(telemetry),
+        "checkedAt": checked_at,
+        "inkLevels": [],
+        "media": [],
+        "alerts": [],
+        "lowestInkPercent": None,
+    }
+    return {
+        "is_on": True,
+        "appliance": appliance,
+        "raw": {"source": "creality-k2-websocket", "host": host, "telemetry": telemetry},
+    }
 
 
 def magicard_network_status(device: Device, checked_at: str | None = None) -> dict[str, Any]:
@@ -991,7 +1321,7 @@ async def discover_printers(
             continue
         printers.append(result)
 
-    printers.sort(key=lambda item: (not item.get("snmp_supported"), item.get("name") or item.get("host") or ""))
+    printers.sort(key=lambda item: (not (item.get("snmp_supported") or item.get("k2_supported")), item.get("name") or item.get("host") or ""))
     return {"printers": printers, "scanned_subnets": scanned_subnets}
 
 
@@ -1212,6 +1542,18 @@ async def _enrich_discovery_candidate(candidate: dict[str, Any], community: str)
         candidate["host"] = host or candidate.get("host") or ""
     if not candidate.get("model"):
         candidate["model"] = _guess_model(candidate.get("name") or "")
+    advertised_ports = set(candidate.get("ports") or [])
+    if candidate.get("port"):
+        advertised_ports.add(candidate["port"])
+    k2_port_open = K2_WEBSOCKET_PORT in advertised_ports
+    if host and not k2_port_open and candidate.get("source") == "direct":
+        k2_port_open = bool(await _tcp_port_open(host, K2_WEBSOCKET_PORT, 0.75))
+    if host and k2_port_open:
+        k2_candidate = await _probe_creality_k2_candidate(host)
+        if k2_candidate:
+            candidate.update(k2_candidate)
+            candidate["sources"] = sorted(set(candidate.get("sources") or [candidate.get("source")]) | {"creality-k2"})
+            return candidate
     if host and (not candidate.get("model") or _is_generic_printer_name(candidate.get("name"))):
         ipp_candidate = await asyncio.to_thread(_ipp_attribute_candidate, host)
         if ipp_candidate:
@@ -1255,6 +1597,46 @@ async def _enrich_discovery_candidate(candidate: dict[str, Any], community: str)
     if _is_generic_printer_name(candidate.get("name")) or str(candidate.get("name") or "").lower() == "g6000 series":
         candidate["name"] = candidate.get("model") or appliance.get("systemName") or appliance.get("model") or candidate.get("name")
     return candidate
+
+
+async def _probe_creality_k2_candidate(host: str) -> dict[str, Any] | None:
+    probe = ProbeDevice(
+        id=0,
+        name="Creality K2 Pro",
+        brand="printer",
+        model="Creality K2 Pro",
+        host=host,
+        device_key=json.dumps({}),
+        device_uuid=None,
+        device_type="3d-printer",
+        channel=0,
+        is_enabled=True,
+        last_state=None,
+        created_at="",
+        updated_at="",
+    )
+    try:
+        status = await _get_creality_k2_status(probe)
+    except PrinterServiceError:
+        return None
+    telemetry = (status.get("raw") or {}).get("telemetry") or {}
+    identifying_keys = {"nozzleTemp", "printProgress", "printFileName", "TotalLayer", "modelVersion", "cfsConnect"}
+    if not identifying_keys.intersection(telemetry):
+        return None
+    appliance = status.get("appliance") or {}
+    hostname = appliance.get("systemName")
+    return {
+        "name": hostname or "Creality K2 Pro",
+        "model": "Creality K2 Pro",
+        "port": K2_WEBSOCKET_PORT,
+        "device_type": "3d-printer",
+        "k2_supported": True,
+        "snmp_supported": False,
+        "status": appliance.get("status") or "Ready",
+        "current_project": appliance.get("currentProject"),
+        "progress": appliance.get("progress"),
+        "cfs_connected": bool((appliance.get("cfs") or {}).get("connected")),
+    }
 
 
 def _is_generic_printer_name(value: str | None) -> bool:

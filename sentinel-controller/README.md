@@ -70,6 +70,20 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
 
 ## Configuration
 
+Tuya / Smart Life devices automatically recover from changed IP addresses when a
+LAN request fails. Sentinel discovers the saved device ID, verifies the candidate
+with its existing local key, saves the working address, and retries the request.
+Dashboard and Apple Home requests both use the updated address. Failed discovery
+is limited to once per device every 30 seconds. Discovery requires the device's
+local broadcast network; routed VLANs may still need a DHCP reservation or a
+manual address update. This recovery does not apply to cameras or printers.
+
+Printer monitoring includes a Python SNMP client, so Windows does not need separate
+`snmpget` or `snmpwalk` programs. Existing Net-SNMP installations are still supported.
+After updating requirements, restart Sentinel and rediscover printers.
+
+The dashboard's Sentinel setup section and Cameras / NVR header include a **Restart Sentinel** button. Start Sentinel using the platform launcher (or `python -m app.server --host 0.0.0.0 --port 8088`) to enable it. The server gracefully stops recording and device tasks, starts a fresh process with the same address and TLS settings, and the page reloads when ready. After updating an existing installation, close the old server and open the launcher once. Direct `uvicorn` starts do not support this button.
+
 `.env`:
 
 ```env
@@ -111,6 +125,7 @@ POST   /devices/{id}/lock
 POST   /devices/{id}/unlock
 POST   /devices/{id}/brightness
 GET    /devices/{id}/capabilities
+POST   /devices/{id}/tuya/command
 POST   /devices/{id}/smartthings/command
 GET    /devices/{id}/cudy/stats
 POST   /devices/{id}/cudy/reboot
@@ -143,7 +158,7 @@ http://localhost:8088/cameras
 
 Sentinel supports local ONVIF discovery and manual RTSP camera setup. Install FFmpeg and FFprobe on the computer running Sentinel before enabling live video or recording:
 
-Discovery combines same-LAN ONVIF multicast with bounded unicast probing of private `/22` through `/30` networks in the host routing table. This allows routed VPN and VLAN camera discovery when multicast cannot cross the router. Add extra networks in the setup form or with `SENTINEL_CAMERA_SUBNETS=10.1.1.0/24,192.168.50.0/24`. The VPN/router firewall must permit the camera's ONVIF web port and RTSP port from the Sentinel computer.
+Discovery combines same-LAN ONVIF multicast with bounded unicast probing of directly connected LAN and routed private `/22` through `/30` networks in the host routing table. Cameras that do not answer multicast can still be found through ONVIF or RTSP, including across reachable VPNs and VLANs. Add extra networks in the setup form or with `SENTINEL_CAMERA_SUBNETS=10.1.1.0/24,192.168.50.0/24`. The VPN/router firewall must permit the camera's ONVIF web port and RTSP port from the Sentinel computer. RTSP-only results require a stream path and camera credentials for video setup.
 
 - macOS with Homebrew: `brew install ffmpeg`
 - Windows with winget: `winget install Gyan.FFmpeg`
@@ -199,6 +214,20 @@ curl -X POST http://localhost:8088/devices/10/brightness \
   -H "Content-Type: application/json" \
   -d '{"luminance":50}'
 ```
+
+## Creality K2 Pro 3D Printer
+
+Add the K2 Pro from **Add devices → Printers** and choose **Creality K2 Pro 3D printer**. Enter the printer's LAN IP address. Sentinel reads the local Creality WebSocket on port `9999` and shows the active file, print state and progress, layers, elapsed and remaining time, nozzle/bed/chamber temperatures, fan speeds, print speed, and CFS filament slots (including material, color, RFID percentage, and selected slot when reported).
+
+The camera field is optional and defaults to:
+
+```text
+http://PRINTER-IP:4408/camera.html
+```
+
+That URL expects a local K2 camera viewer installed in Fluidd. If your firmware exposes the legacy camera page instead, enter its URL (commonly `http://PRINTER-IP:8000/`). Camera interfaces vary by K2 firmware; the dashboard also provides an **Open camera viewer** link if the browser refuses to embed the page. Keep ports `9999`, `4408`, and any camera endpoint private to your LAN or VPN.
+
+Sentinel keeps up to 200 diagnostic events per printer. It records disconnect/reconnect transitions, print errors or unexpected stops, and the job, layer, temperatures, and progress at the time. The printer detail screen can also enable key-based SSH diagnostics. When enabled, Sentinel connects as `root` using the Sentinel host's existing SSH key and samples `/proc/uptime`, the Linux boot ID, and recent `logread` output once per minute. Boot-ID changes or uptime resets provide strong evidence of an actual printer reboot instead of a Wi-Fi interruption. Configure key access first; Sentinel deliberately does not store an SSH password.
 
 ## Scan The Network
 
@@ -357,6 +386,52 @@ curl http://localhost:8088/devices/12/cudy/stats
 curl -X POST http://localhost:8088/devices/12/cudy/reboot
 ```
 
+## Milexus / Smart Life AC (local Tuya LAN)
+
+Sentinel can control a Wi-Fi Milexus AC locally when the unit is a Tuya / Smart
+Life device. Runtime control goes directly from Sentinel to the AC on the LAN;
+Sentinel neither links to nor stores a Smart Life account.
+
+You need its reserved LAN IP, Tuya device ID, 16-character local key, and
+protocol version (usually 3.3, 3.4, or 3.5). Find the device ID and version with:
+
+```powershell
+python -m tinytuya scan
+```
+
+Stock Tuya firmware does not disclose the local key over the LAN. Retrieve it
+once using TinyTuya's Tuya IoT setup wizard (temporary cloud project/app link)
+or a local Android extraction method. This is only for key retrieval, not normal
+operation. Resetting or re-pairing the AC changes the key.
+
+Inspect the AC's raw datapoints:
+
+```powershell
+python -c "import tinytuya; d=tinytuya.Device('DEVICE_ID','192.168.1.50','LOCAL_KEY',version=3.3); print(d.status())"
+```
+
+Compare that output while changing power, mode, temperature, fan, and swing in
+Smart Life. Record which numbered DP changes. Add the AC using the observed DP
+numbers (the numbers below are placeholders):
+
+```powershell
+$config = '{"local_key":"LOCAL_KEY","version":3.3,"temperature_divisor":1,"dps":{"power":"1","mode":"2","target_temperature":"3","current_temperature":"4","fan_speed":"5","swing":"8"}}'
+$body = @{name='Milexus AC'; brand='milexus'; model='Smart WiFi AC'; host='192.168.1.50'; device_uuid='TUYA_DEVICE_ID'; device_type='air-conditioner'; device_key=$config} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8088/devices -ContentType application/json -Body $body
+```
+
+On, Off, Toggle, and state now use Sentinel's normal routes. AC settings use:
+
+```powershell
+$body = @{power=$true; mode='cold'; target_temperature=24; fan_speed='auto'} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8088/devices/DEVICE_ROW_ID/tuya/command -ContentType application/json -Body $body
+```
+
+Use the exact mode/fan values shown in the raw response. If `240` means 24.0 C,
+set `temperature_divisor` to `10`. Reserve the IP and allow local TCP port 6668.
+After setup you can block the AC's internet access, provided Sentinel can still
+reach it on the LAN/VLAN.
+
 ## Manual Device Key Notes
 
 For testing, pair the device normally in the Meross app, use a temporary Home Assistant install with the Meross LAN HACS integration to retrieve the device key, then save the IP and key in this controller. Normal LAN control should work without internet when:
@@ -366,7 +441,29 @@ For testing, pair the device normally in the Meross app, use a temporary Home As
 - the saved key is correct
 - the device firmware supports local LAN control
 
-HomeKit APIs are Apple-platform specific, so HomeKit is intentionally not used here.
+## Apple Home bridge
+
+Sentinel can advertise supported devices as one local Apple Home bridge. Use
+the **Set up Apple Home** button in Sentinel, or open
+`http://THIS-PC-IP:8088/homekit` from any device on the same trusted network.
+Enable the bridge, then scan the displayed QR code in the Apple Home app. The Sentinel computer and Apple devices must be on
+the same LAN, and the network must allow Bonjour/mDNS traffic.
+
+Switches, outlets, lights, locks, garage doors, thermostats, common sensors,
+and configured local RTSP cameras are mapped to native Apple Home services.
+Camera streaming requires FFmpeg. Devices are selected by default and can be
+disabled individually on the Apple Home setup page to avoid duplicates from
+another bridge.
+
+Ring doorbells publish doorbell and motion events through the bridge. Ring live
+video remains in Sentinel's camera view in this release because its cloud WebRTC
+feed cannot be passed directly to HomeKit's SRTP camera session. Local RTSP
+cameras support snapshots and live Apple Home video.
+
+Pairing keys remain local in `data/homekit/`. The **Reset pairing** action
+removes only the Apple Home bridge pairing; it does not delete Sentinel devices.
+This software bridge is intended for personal/local installations and is not an
+Apple-certified commercial accessory.
 
 ## Implementation Notes
 

@@ -6,13 +6,21 @@
   let hls = null;
   let refreshTimers = [];
   let gridHls = [];
-  let viewMode = "cards";
+  let viewMode = "wall";
   let recordingSegments = [];
   let playbackSegmentIndex = -1;
   let playbackRun = 0;
   let playbackPlayer = null;
   let timelineStartMs = 0;
   let timelineEndMs = 0;
+  let discoveredCameras = [];
+  let liveReconnectTimer = null;
+  let liveStallTimer = null;
+  let liveReconnectAttempts = 0;
+  let liveProgressTimer = null;
+  let liveLastCurrentTime = -1;
+  let liveStalledChecks = 0;
+  let liveRecoveryAttempts = 0;
 
   const request = async (url, options = {}) => {
     const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
@@ -119,7 +127,13 @@
       return;
     }
     if (window.Hls && Hls.isSupported()) {
-      const instance = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8 });
+      const instance = new Hls({
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
+        maxLiveSyncPlaybackRate: 1.5,
+        maxBufferLength: 4,
+        backBufferLength: 2,
+      });
       gridHls.push(instance);
       instance.loadSource(url);
       instance.attachMedia(video);
@@ -145,12 +159,17 @@
     ];
     $("emptyState").hidden = rows.length > 0;
     const split = viewMode === "split";
+    const wall = viewMode === "wall";
     grid.classList.toggle("split-view", split);
-    $("liveViewTitle").textContent = split ? "4-camera view" : "Camera grid";
-    $("cardViewButton").setAttribute("aria-pressed", String(!split));
+    grid.classList.toggle("wall-view", wall);
+    grid.dataset.count = String(rows.length);
+    $("liveViewTitle").textContent = wall ? "All cameras" : split ? "4-camera view" : "Camera grid";
+    $("wallViewButton").setAttribute("aria-pressed", String(wall));
+    $("cardViewButton").setAttribute("aria-pressed", String(viewMode === "cards"));
     $("splitViewButton").setAttribute("aria-pressed", String(split));
-    if (split) {
-      renderSplitView(grid, rows);
+    if (split || wall) {
+      renderSplitView(grid, rows, wall ? rows.length : 4);
+      fitCameraWall();
       updateLiveClocks();
       return;
     }
@@ -183,8 +202,22 @@
     updateLiveClocks();
   }
 
-  function renderSplitView(grid, rows) {
-    for (let index = 0; index < 4; index += 1) {
+  function fitCameraWall() {
+    const grid = $("cameraGrid");
+    if (viewMode !== "wall") return;
+    const width = grid.clientWidth;
+    const columns = width >= 1500 ? 5 : width >= 1000 ? 4 : width >= 700 ? 3 : width >= 440 ? 2 : 1;
+    const count = Number(grid.dataset.count) || 1;
+    const actualColumns = Math.min(columns, count);
+    const rows = Math.ceil(count / actualColumns);
+    grid.style.setProperty("--wall-columns", actualColumns);
+    grid.style.setProperty("--wall-rows", rows);
+    const available = window.innerHeight - grid.getBoundingClientRect().top - 8;
+    grid.style.setProperty("--wall-height", Math.max(rows * (width < 700 ? 160 : 110), available) + "px");
+  }
+
+  function renderSplitView(grid, rows, count = 4) {
+    for (let index = 0; index < count; index += 1) {
       const camera = rows[index];
       const pane = document.createElement("article");
       pane.className = "split-camera" + (camera ? "" : " empty");
@@ -257,19 +290,96 @@
     }
   }
 
-  function selectCamera(c) {
+  async function selectCamera(c) {
+    if (document.fullscreenElement) {
+      try { await document.exitFullscreen(); }
+      catch { banner("Exit fullscreen to open the camera timeline."); return; }
+    }
     selected = c;
+    // The large player is the priority view. Stop background HLS decoders so
+    // several camera tiles cannot starve it of browser decode/buffer resources.
+    cleanupGridStreams();
+    $("ptzControls").hidden = true;
     $("playbackSection").hidden = false;
     $("playbackTitle").textContent = c.name + " timeline";
-    $("timelineDate").value = $("timelineDate").value || new Date().toISOString().slice(0, 10);
+    $("timelineDate").value = $("timelineDate").value || localDateValue();
     window.scrollTo({ top: $("playbackSection").offsetTop - 90, behavior: "smooth" });
     startLive();
     recordings();
+    loadPtzCapabilities(c);
   }
 
-  function stopPlayer() {
+  async function loadPtzCapabilities(camera) {
+    if (camera.kind === "ring") return;
+    $("ptzStatus").textContent = "Checking camera…";
+    try {
+      const capability = await request(`/api/cameras/${camera.id}/ptz`);
+      if (!selected || selected.id !== camera.id) return;
+      $("ptzControls").hidden = !capability.supported;
+      $("ptzStatus").textContent = capability.supported ? "Press and hold to move" : "PTZ unavailable";
+      document.querySelectorAll("[data-ptz-pan]").forEach((button) => (button.disabled = !capability.pan_tilt));
+      document.querySelectorAll("[data-ptz-zoom]").forEach((button) => (button.disabled = !capability.zoom));
+    } catch (error) {
+      if (selected && selected.id === camera.id) {
+        $("ptzControls").hidden = true;
+        $("ptzStatus").textContent = error.message;
+      }
+    }
+  }
+
+  async function ptzMove(pan, tilt, zoom) {
+    if (!selected) return;
+    $("ptzStatus").textContent = "Moving…";
+    try {
+      await request(`/api/cameras/${selected.id}/ptz/move`, {
+        method: "POST", body: JSON.stringify({ pan, tilt, zoom }),
+      });
+    } catch (error) {
+      $("ptzStatus").textContent = error.message;
+    }
+  }
+
+  async function ptzStop() {
+    if (!selected || $("ptzControls").hidden) return;
+    try {
+      await request(`/api/cameras/${selected.id}/ptz/stop`, { method: "POST" });
+      $("ptzStatus").textContent = "Press and hold to move";
+    } catch (error) {
+      $("ptzStatus").textContent = error.message;
+    }
+  }
+
+  function bindPtzButton(button, velocity) {
+    const start = (event) => {
+      event.preventDefault();
+      if (button.setPointerCapture && event.pointerId != null) button.setPointerCapture(event.pointerId);
+      ptzMove(velocity.pan || 0, velocity.tilt || 0, velocity.zoom || 0);
+    };
+    button.addEventListener("pointerdown", start);
+    button.addEventListener("pointerup", ptzStop);
+    button.addEventListener("pointercancel", ptzStop);
+    button.addEventListener("lostpointercapture", ptzStop);
+    button.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && !event.repeat) start(event);
+    });
+    button.addEventListener("keyup", (event) => {
+      if (event.key === "Enter" || event.key === " ") ptzStop();
+    });
+  }
+
+  function stopPlayer(preserveLiveRetry = false) {
     playbackRun += 1;
     playbackSegmentIndex = -1;
+    clearTimeout(liveReconnectTimer);
+    clearTimeout(liveStallTimer);
+    clearInterval(liveProgressTimer);
+    liveReconnectTimer = null;
+    liveStallTimer = null;
+    liveProgressTimer = null;
+    liveLastCurrentTime = -1;
+    liveStalledChecks = 0;
+    liveRecoveryAttempts = 0;
+    if (!preserveLiveRetry) liveReconnectAttempts = 0;
     if (hls) {
       hls.destroy();
       hls = null;
@@ -280,6 +390,11 @@
       player.ontimeupdate = null;
       player.onloadedmetadata = null;
       player.oncanplay = null;
+      player.onplaying = null;
+      player.onwaiting = null;
+      player.onstalled = null;
+      player.onerror = null;
+      player.onended = null;
       player.removeAttribute("src");
       player.classList.toggle("playback-active", index === 0);
       player.setAttribute("aria-hidden", index === 0 ? "false" : "true");
@@ -288,9 +403,73 @@
     playbackPlayer = $("player");
   }
 
-  function startLive() {
+  function scheduleLiveReconnect(message = "Live video paused. Reconnecting…") {
+    if (liveReconnectTimer || !selected || selected.kind === "ring") return;
+    const cameraId = selected.id;
+    const video = $("player");
+    if (!video.poster) video.poster = `/api/cameras/${cameraId}/snapshot?t=${Date.now()}`;
+    const delay = Math.min(500 + liveReconnectAttempts * 500, 2000);
+    $("playerMessage").textContent = message;
+    liveReconnectTimer = setTimeout(() => {
+      liveReconnectTimer = null;
+      if (!selected || selected.id !== cameraId) return;
+      if (selected && selected.id === cameraId) startLive(true);
+    }, delay);
+  }
+
+  function recoverLiveInPlace(message = "Live video paused. Recovering…") {
+    clearTimeout(liveStallTimer);
+    if (!selected || selected.kind === "ring") return;
+    $("playerMessage").textContent = message;
+    liveRecoveryAttempts += 1;
+    if (hls) {
+      try {
+        hls.stopLoad();
+        hls.startLoad(-1);
+        if (liveRecoveryAttempts > 1) hls.recoverMediaError();
+        $("player").play().catch(() => {});
+      } catch {}
+    } else {
+      $("player").play().catch(() => {});
+    }
+    liveStallTimer = setTimeout(() => {
+      if (liveStalledChecks >= 2) scheduleLiveReconnect("Live feed is reconnecting…");
+    }, 3500);
+  }
+
+  function watchForLiveStall() {
+    clearTimeout(liveStallTimer);
+    liveStallTimer = setTimeout(() => recoverLiveInPlace(), 2500);
+  }
+
+  function startLiveProgressWatchdog(video) {
+    clearInterval(liveProgressTimer);
+    liveLastCurrentTime = video.currentTime;
+    liveStalledChecks = 0;
+    liveProgressTimer = setInterval(() => {
+      if (!selected || selected.kind === "ring" || video.paused || video.ended) return;
+      const current = video.currentTime;
+      if (current > liveLastCurrentTime + 0.05) {
+        liveLastCurrentTime = current;
+        liveStalledChecks = 0;
+        liveRecoveryAttempts = 0;
+        clearTimeout(liveStallTimer);
+        liveStallTimer = null;
+        $("playerMessage").textContent = "";
+        return;
+      }
+      if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+        liveStalledChecks += 1;
+        if (liveStalledChecks === 2) recoverLiveInPlace();
+        else if (liveStalledChecks >= 4) scheduleLiveReconnect("Live feed is reconnecting…");
+      }
+    }, 1500);
+  }
+
+  function startLive(isRetry = false) {
     if (!selected) return;
-    stopPlayer();
+    stopPlayer(isRetry);
+    if (isRetry) liveReconnectAttempts += 1;
     showLiveStatus(selected.kind === "ring" ? "LIVE SNAP" : "LIVE NOW");
     const video = $("player");
     $("playerMessage").textContent = "Connecting to live video…";
@@ -298,22 +477,58 @@
       $("playerMessage").textContent = "Open this Ring camera from the dashboard for its live WebRTC feed.";
       return;
     }
-    const url = `/api/cameras/${selected.id}/live/index.m3u8`;
+    const url = `/api/cameras/${selected.id}/live/index.m3u8?session=${Date.now()}`;
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
       video.play().catch(() => {});
     } else if (window.Hls && Hls.isSupported()) {
-      hls = new Hls({ liveSyncDurationCount: 2 });
+      hls = new Hls({
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
+        maxLiveSyncPlaybackRate: 1.5,
+        maxBufferLength: 4,
+        backBufferLength: 2,
+        manifestLoadingMaxRetry: 8,
+        levelLoadingMaxRetry: 8,
+        fragLoadingMaxRetry: 8,
+        manifestLoadingRetryDelay: 300,
+        levelLoadingRetryDelay: 300,
+        fragLoadingRetryDelay: 300
+      });
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) $("playerMessage").textContent = "Live stream unavailable.";
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          recoverLiveInPlace("Live network hiccup. Recovering…");
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          try { hls.recoverMediaError(); } catch {}
+          watchForLiveStall();
+        } else {
+          scheduleLiveReconnect("Live stream interrupted. Reconnecting…");
+        }
       });
     } else {
       $("playerMessage").textContent = "Live video needs HLS support; camera previews remain available.";
     }
-    video.onplaying = () => ($("playerMessage").textContent = "");
+    video.onplaying = () => {
+      clearTimeout(liveStallTimer);
+      liveReconnectAttempts = 0;
+      liveRecoveryAttempts = 0;
+      liveStalledChecks = 0;
+      video.removeAttribute("poster");
+      $("playerMessage").textContent = "";
+    };
+    video.onwaiting = watchForLiveStall;
+    video.onstalled = watchForLiveStall;
+    video.onerror = () => scheduleLiveReconnect("Live video failed. Reconnecting…");
+    video.onended = () => scheduleLiveReconnect();
+    startLiveProgressWatchdog(video);
+  }
+
+  function localDateValue(date = new Date()) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
   async function recordings() {
@@ -322,7 +537,7 @@
       $("timelineSummary").textContent = "Ring is live-only";
       return;
     }
-    const day = $("timelineDate").value || new Date().toISOString().slice(0, 10);
+    const day = $("timelineDate").value || localDateValue();
     const start = new Date(day + "T00:00:00");
     const end = new Date(day + "T23:59:59.999");
     try {
@@ -470,15 +685,8 @@
     try {
       const requested = $("discoverySubnet").value.split(",").map((v) => v.trim()).filter(Boolean);
       const data = await request("/api/cameras/discover", { method: "POST", body: JSON.stringify({ timeout_seconds: 3, subnets: requested, scan_routed_subnets: true }) });
-      const select = $("discoveredCameras");
-      select.innerHTML = '<option value="">Select a discovered camera</option>';
-      data.cameras.forEach((c) => {
-        const o = document.createElement("option");
-        o.value = c.host;
-        o.dataset.port = String(c.onvif_port || 80);
-        o.textContent = c.host + " · " + (c.types[0] || c.source || "camera") + (c.subnet ? " · " + c.subnet : "");
-        select.appendChild(o);
-      });
+      discoveredCameras = data.cameras;
+      renderDiscoveredCameras();
       const scanned = (data.scanned_subnets || []).join(", ");
       if (!data.cameras.length) banner("No ONVIF or RTSP cameras answered on " + (scanned || "the detected networks") + ". Confirm the VPN route and camera firewall rules.", false);
       else banner("Found " + data.cameras.length + " camera candidate(s) while scanning " + scanned + ".", false);
@@ -490,12 +698,127 @@
     }
   }
 
+  function normalizedHost(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function cameraLabel(camera) {
+    return (camera.types && camera.types[0]) || camera.source || "ONVIF camera";
+  }
+
+  function renderDiscoveredCameras() {
+    const panel = $("discoveredCameraPanel");
+    const list = $("discoveredCameraList");
+    const existingHosts = new Set(cameras.map((camera) => normalizedHost(camera.host)));
+    list.innerHTML = "";
+    discoveredCameras.forEach((camera, index) => {
+      const alreadyAdded = existingHosts.has(normalizedHost(camera.host));
+      const label = document.createElement("label");
+      label.className = "discovered-camera-item" + (alreadyAdded ? " is-added" : "");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "discovered-camera-check";
+      checkbox.dataset.index = String(index);
+      checkbox.disabled = alreadyAdded;
+      checkbox.onchange = updateBatchSelection;
+      const details = document.createElement("span");
+      const host = document.createElement("strong");
+      host.textContent = camera.host;
+      const description = document.createElement("small");
+      description.textContent = cameraLabel(camera) + (camera.subnet ? " · " + camera.subnet : "");
+      details.append(host, description);
+      const state = document.createElement("em");
+      state.textContent = alreadyAdded ? "Already added" : "New";
+      label.append(checkbox, details, state);
+      list.appendChild(label);
+    });
+    const available = discoveredCameras.filter((camera) => !existingHosts.has(normalizedHost(camera.host))).length;
+    $("discoveredCameraSummary").textContent = available + " new · " + (discoveredCameras.length - available) + " already added";
+    panel.hidden = false;
+    $("selectAllDiscovered").checked = false;
+    $("selectAllDiscovered").disabled = available === 0;
+    $("batchCameraStatus").textContent = "";
+    updateBatchSelection();
+  }
+
+  function selectedDiscoveredCameras() {
+    return [...document.querySelectorAll(".discovered-camera-check:checked")]
+      .map((checkbox) => discoveredCameras[Number(checkbox.dataset.index)])
+      .filter(Boolean);
+  }
+
+  function updateBatchSelection() {
+    const selectedCount = selectedDiscoveredCameras().length;
+    const available = [...document.querySelectorAll(".discovered-camera-check:not(:disabled)")];
+    $("addSelectedCamerasButton").disabled = selectedCount === 0;
+    $("addSelectedCamerasButton").textContent = selectedCount ? `Add ${selectedCount} selected camera${selectedCount === 1 ? "" : "s"}` : "Add selected cameras";
+    $("selectAllDiscovered").checked = available.length > 0 && available.every((checkbox) => checkbox.checked);
+    $("selectAllDiscovered").indeterminate = selectedCount > 0 && selectedCount < available.length;
+  }
+
+  async function fetchProfiles(camera) {
+    const data = await request("/api/cameras/onvif-profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        host: camera.host,
+        port: Number(camera.onvif_port || 80),
+        username: $("cameraUsername").value || null,
+        password: $("cameraPassword").value || null,
+      }),
+    });
+    if (!data.profiles.length) throw new Error("No ONVIF stream profiles were returned.");
+    return data.profiles;
+  }
+
+  async function addSelectedCameras() {
+    const selectedCameras = selectedDiscoveredCameras();
+    if (!selectedCameras.length) return;
+    const button = $("addSelectedCamerasButton");
+    const checkboxes = [...document.querySelectorAll(".discovered-camera-check")];
+    button.disabled = true;
+    checkboxes.forEach((checkbox) => (checkbox.disabled = true));
+    const added = [];
+    const failed = [];
+    for (let index = 0; index < selectedCameras.length; index += 1) {
+      const camera = selectedCameras[index];
+      $("batchCameraStatus").textContent = `Loading profiles and adding ${index + 1} of ${selectedCameras.length}: ${camera.host}`;
+      try {
+        const cameraProfiles = await fetchProfiles(camera);
+        const bySize = [...cameraProfiles].sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)));
+        const main = bySize[0];
+        const sub = bySize.length > 1 ? bySize[bySize.length - 1] : null;
+        await request("/api/cameras", {
+          method: "POST",
+          body: JSON.stringify({
+            name: `IP Camera ${camera.host}`,
+            host: camera.host,
+            model: null,
+            username: $("cameraUsername").value || null,
+            password: $("cameraPassword").value || null,
+            main_stream_url: main.stream_url,
+            sub_stream_url: sub && sub.stream_url !== main.stream_url ? sub.stream_url : null,
+            recording_enabled: $("recordingEnabled").checked,
+          }),
+        });
+        added.push(camera.host);
+      } catch (error) {
+        failed.push(`${camera.host}: ${error.message}`);
+      }
+    }
+    await load();
+    renderDiscoveredCameras();
+    if (failed.length) {
+      $("batchCameraStatus").textContent = `Added ${added.length}. Could not add ${failed.length}: ${failed.join("; ")}`;
+      banner(`Added ${added.length} camera${added.length === 1 ? "" : "s"}; ${failed.length} need attention.`, true);
+    } else {
+      $("batchCameraStatus").textContent = `Added ${added.length} camera${added.length === 1 ? "" : "s"} successfully.`;
+      banner(`Added ${added.length} camera${added.length === 1 ? "" : "s"}. Sentinel is starting their recorders.`, false);
+    }
+  }
+
   async function profiles() {
     try {
-      const data = await request("/api/cameras/onvif-profiles", {
-        method: "POST",
-        body: JSON.stringify({ host: $("cameraHost").value, port: Number($("onvifPort").value), username: $("cameraUsername").value || null, password: $("cameraPassword").value || null }),
-      });
+      const data = { profiles: await fetchProfiles({ host: $("cameraHost").value, onvif_port: Number($("onvifPort").value) }) };
       ["mainProfile", "subProfile"].forEach((id) => {
         $(id).innerHTML = `<option value="">${id === "mainProfile" ? "Enter RTSP URL manually" : "Use main stream"}</option>`;
         data.profiles.forEach((p) => {
@@ -578,9 +901,33 @@
   $("addButton").onclick = $("emptyAddButton").onclick = () => $("cameraDialog").showModal();
   $("storageButton").onclick = openStorage;
   $("cardViewButton").onclick = () => setViewMode("cards");
+  $("wallViewButton").onclick = () => setViewMode("wall");
+  $("stretchViewButton").onclick = () => {
+    const stretched = $("cameraGrid").classList.toggle("stretched-view");
+    $("stretchViewButton").setAttribute("aria-pressed", String(stretched));
+  };
+  $("fullscreenButton").onclick = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await $("liveSection").requestFullscreen();
+    } catch (error) {
+      banner("Fullscreen is unavailable. You can still use the camera wall in this window.");
+    }
+  };
+  document.addEventListener("fullscreenchange", () => {
+    $("fullscreenButton").textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+    fitCameraWall();
+  });
+  window.addEventListener("resize", fitCameraWall);
+  new ResizeObserver(fitCameraWall).observe($("liveSection"));
   $("splitViewButton").onclick = () => setViewMode("split");
   $("refreshButton").onclick = load;
   $("discoverButton").onclick = discover;
+  $("addSelectedCamerasButton").onclick = addSelectedCameras;
+  $("selectAllDiscovered").onchange = (event) => {
+    document.querySelectorAll(".discovered-camera-check:not(:disabled)").forEach((checkbox) => (checkbox.checked = event.target.checked));
+    updateBatchSelection();
+  };
   $("loadProfilesButton").onclick = profiles;
   $("cameraForm").onsubmit = saveCamera;
   $("storageForm").onsubmit = saveStorage;
@@ -589,13 +936,13 @@
     recordings();
   };
   $("jumpLiveButton").onclick = startLive;
-  $("discoveredCameras").onchange = (e) => {
-    if (e.target.value) {
-      $("cameraHost").value = e.target.value;
-      $("onvifPort").value = e.target.selectedOptions[0].dataset.port || 80;
-      $("cameraName").value = $("cameraName").value || "IP Camera";
-    }
-  };
+  document.querySelectorAll("[data-ptz-pan]").forEach((button) => bindPtzButton(button, {
+    pan: Number(button.dataset.ptzPan), tilt: Number(button.dataset.ptzTilt),
+  }));
+  document.querySelectorAll("[data-ptz-zoom]").forEach((button) => bindPtzButton(button, {
+    zoom: Number(button.dataset.ptzZoom),
+  }));
+  $("ptzStopButton").onclick = ptzStop;
   $("mainProfile").onchange = (e) => {
     if (e.target.value) $("mainStream").value = e.target.value;
   };

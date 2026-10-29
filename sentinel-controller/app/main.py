@@ -14,6 +14,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from app.system_api import router as system_router
+from app.homekit_api import router as homekit_router
 
 from app import (
     camera_db,
@@ -30,8 +32,12 @@ from app import (
     ring_service,
     smartthings_import,
     smartthings_service,
+    tuya_service,
+    wankezi_import,
     yale_import,
     yale_service,
+    homekit_db,
+    homekit_service,
 )
 from app.schemas import (
     BrightnessRequest,
@@ -39,6 +45,7 @@ from app.schemas import (
     CameraCreateRequest,
     CameraDiscoveryRequest,
     CameraOnvifProfilesRequest,
+    CameraPtzMoveRequest,
     CameraOut,
     CameraStorageUpdate,
     CameraUpdateRequest,
@@ -57,6 +64,7 @@ from app.schemas import (
     NetworkScanResult,
     PrinterDiscoveryRequest,
     PrinterInkRefillRequest,
+    PrinterSshDiagnosticsRequest,
     RingAlertResponse,
     RingImportRequest,
     RingImportResponse,
@@ -67,6 +75,9 @@ from app.schemas import (
     SmartThingsCommandRequest,
     SmartThingsOAuthStartRequest,
     SmartThingsOAuthStartResponse,
+    TuyaCommandRequest,
+    WankeziImportRequest,
+    WankeziImportResponse,
     DuplicateRepairResponse,
     ReliabilityHealthResponse,
     YaleImportRequest,
@@ -104,12 +115,15 @@ async def lifespan(app: FastAPI):
     global background_refresh_task, background_printer_refresh_task
     await db.init_db()
     await camera_db.init_camera_db()
+    await homekit_db.init_homekit_db()
     await camera_service.start_manager()
     logger.info("Database initialized at %s", db.resolve_database_path())
     reliability_state["started_at"] = _now_iso()
     background_refresh_task = asyncio.create_task(_background_cloud_refresh_loop())
     background_printer_refresh_task = asyncio.create_task(_background_printer_refresh_loop())
+    await homekit_service.start()
     yield
+    await homekit_service.stop()
     if background_refresh_task:
         background_refresh_task.cancel()
         try:
@@ -133,6 +147,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(system_router)
+app.include_router(homekit_router)
 app.mount("/icons", StaticFiles(directory=ICONS_DIR), name="icons")
 app.mount("/brand", StaticFiles(directory=BRAND_DIR), name="brand")
 
@@ -223,12 +239,20 @@ def _raise_nest_error(exc: nest_service.NestServiceError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
 
+def _raise_tuya_error(exc: tuya_service.TuyaServiceError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
 def _is_smartthings(device) -> bool:
     return device.brand.lower() == "smartthings"
 
 
 def _is_nest(device) -> bool:
     return device.brand.lower() == "nest"
+
+
+def _is_tuya(device) -> bool:
+    return device.brand.lower() in {"tuya", "smartlife", "smart-life", "milexus"}
 
 
 def _is_ring(device) -> bool:
@@ -295,6 +319,51 @@ def _cached_state(device) -> dict | None:
         return json.loads(device.last_state)
     except json.JSONDecodeError:
         return None
+
+
+async def _record_k2_diagnostics(device, previous: dict | None, current: dict) -> None:
+    if not printer_service._is_creality_k2(device):
+        return
+    previous = previous or {}
+    previous_on = previous.get("is_on")
+    current_on = current.get("is_on")
+    old_diag = ((previous.get("appliance") or {}).get("diagnostics") or {})
+    new_appliance = current.get("appliance") or {}
+    new_diag = new_appliance.get("diagnostics") or {}
+    details = {
+        "project": new_appliance.get("currentProject"),
+        "progress": new_appliance.get("progress"),
+        "layer": new_appliance.get("layer"),
+        "temperatures": new_appliance.get("temperatures"),
+        "uptimeSeconds": new_diag.get("uptimeSeconds"),
+        "bootId": new_diag.get("bootId"),
+    }
+    if previous_on is True and current_on is False:
+        await db.add_printer_diagnostic(device.id, "disconnect", "Printer stopped responding.", details)
+    elif previous_on is False and current_on is True:
+        message = "Printer reconnected."
+        event_type = "reconnect"
+        if new_diag.get("uptimeSeconds") is not None and new_diag["uptimeSeconds"] < 300:
+            message = "Printer reboot confirmed by low system uptime."
+            event_type = "reboot"
+        await db.add_printer_diagnostic(device.id, event_type, message, details)
+    old_boot = old_diag.get("bootId")
+    new_boot = new_diag.get("bootId")
+    old_uptime = old_diag.get("uptimeSeconds")
+    new_uptime = new_diag.get("uptimeSeconds")
+    if current_on and old_boot and new_boot and old_boot != new_boot:
+        await db.add_printer_diagnostic(device.id, "reboot", "Printer boot ID changed; a system restart occurred.", details)
+    elif current_on and old_uptime is not None and new_uptime is not None and new_uptime + 30 < old_uptime:
+        await db.add_printer_diagnostic(device.id, "reboot", "Printer uptime reset; a system restart occurred.", details)
+    old_status = (previous.get("appliance") or {}).get("stateKey")
+    new_status = new_appliance.get("stateKey")
+    if old_status and new_status and old_status != new_status and new_status in {"error", "stopped", "paused"}:
+        await db.add_printer_diagnostic(device.id, "print-state", f"Print state changed from {old_status} to {new_status}.", details)
+
+
+async def _attach_k2_diagnostics(device, state: dict) -> None:
+    if printer_service._is_creality_k2(device):
+        state.setdefault("appliance", {})["diagnosticEvents"] = await db.list_printer_diagnostics(device.id, 25)
 
 
 async def _persist_smartthings_oauth_credentials(device) -> None:
@@ -382,6 +451,8 @@ async def _background_cloud_refresh_loop() -> None:
 async def _refresh_printer_device(device) -> None:
     checked_at = _now_iso()
     state = await printer_service.get_status(device, checked_at=checked_at)
+    await _record_k2_diagnostics(device, _cached_state(device), state)
+    await _attach_k2_diagnostics(device, state)
     await db.save_last_state(device.id, _last_state_summary(state))
 
 
@@ -393,11 +464,15 @@ async def _refresh_printer_devices_once() -> None:
         except printer_service.PrinterTimeoutError as exc:
             checked_at = _now_iso()
             state = printer_service.offline_status(device, _cached_state(device), exc.message, checked_at=checked_at)
+            await _record_k2_diagnostics(device, _cached_state(device), state)
+            await _attach_k2_diagnostics(device, state)
             await db.save_last_state(device.id, _last_state_summary(state))
             logger.info("Background printer refresh timed out for device #%s: %s", device.id, exc.message)
         except printer_service.PrinterServiceError as exc:
             checked_at = _now_iso()
             state = printer_service.offline_status(device, _cached_state(device), exc.message, checked_at=checked_at)
+            await _record_k2_diagnostics(device, _cached_state(device), state)
+            await _attach_k2_diagnostics(device, state)
             await db.save_last_state(device.id, _last_state_summary(state))
             logger.info("Background printer refresh failed for device #%s: %s", device.id, exc.message)
         except Exception:
@@ -654,6 +729,8 @@ async def get_device_state(device_id: int) -> DeviceState:
             await _persist_smartthings_oauth_credentials(device)
         elif _is_nest(device):
             state = await nest_service.get_status(device)
+        elif _is_tuya(device):
+            state = await tuya_service.get_state(device)
         elif _is_ring(device):
             state = await ring_service.get_status(device)
         elif _is_ip_camera(device):
@@ -672,10 +749,13 @@ async def get_device_state(device_id: int) -> DeviceState:
             state = await cudy_service.get_status(device)
         elif _is_printer(device):
             checked_at = _now_iso()
+            previous_printer_state = _cached_state(device)
             try:
                 state = await printer_service.get_status(device, checked_at=checked_at)
             except printer_service.PrinterServiceError as exc:
-                state = printer_service.offline_status(device, _cached_state(device), exc.message, checked_at=checked_at)
+                state = printer_service.offline_status(device, previous_printer_state, exc.message, checked_at=checked_at)
+            await _record_k2_diagnostics(device, previous_printer_state, state)
+            await _attach_k2_diagnostics(device, state)
         else:
             state, device = await _run_meross_with_host_repair(device, meross_service.get_state)
     except meross_service.MerossServiceError as exc:
@@ -684,6 +764,8 @@ async def get_device_state(device_id: int) -> DeviceState:
         _raise_smartthings_error(exc)
     except nest_service.NestServiceError as exc:
         _raise_nest_error(exc)
+    except tuya_service.TuyaServiceError as exc:
+        _raise_tuya_error(exc)
     except ring_service.RingServiceError as exc:
         _raise_ring_error(exc)
     except yale_service.YaleServiceError as exc:
@@ -788,6 +870,11 @@ async def _run_action(device_id: int, action: str) -> DeviceActionResult:
         "turn-off": smartthings_service.turn_off,
         "toggle": smartthings_service.toggle,
     }
+    tuya_actions = {
+        "turn-on": tuya_service.turn_on,
+        "turn-off": tuya_service.turn_off,
+        "toggle": tuya_service.toggle,
+    }
     yale_actions = {
         "lock": yale_service.lock,
         "unlock": yale_service.unlock,
@@ -799,6 +886,10 @@ async def _run_action(device_id: int, action: str) -> DeviceActionResult:
             if action not in smartthings_actions:
                 raise smartthings_service.SmartThingsUnsupportedError("This SmartThings action is not supported yet.")
             result = await smartthings_actions[action](device)
+        elif _is_tuya(device):
+            if action not in tuya_actions:
+                raise tuya_service.TuyaConfigurationError("This Tuya LAN action is not supported.")
+            result = await tuya_actions[action](device)
         elif _is_nest(device):
             raise nest_service.NestUnsupportedError("Use the Nest thermostat endpoint for mode and setpoint control.")
         elif _is_ring(device):
@@ -825,6 +916,8 @@ async def _run_action(device_id: int, action: str) -> DeviceActionResult:
         _raise_yale_error(exc)
     except cudy_service.CudyServiceError as exc:
         _raise_cudy_error(exc)
+    except tuya_service.TuyaServiceError as exc:
+        _raise_tuya_error(exc)
 
     await db.save_last_state(device_id, json.dumps({"is_on": result.get("is_on")}))
     return DeviceActionResult(
@@ -929,6 +1022,71 @@ async def execute_smartthings_command(device_id: int, payload: SmartThingsComman
         requested_state=None,
         message=f"{device.name} command {payload.capability}.{payload.command} sent.",
     )
+
+
+@app.post("/devices/{device_id}/tuya/command", response_model=DeviceState)
+async def execute_tuya_command(device_id: int, payload: TuyaCommandRequest) -> DeviceState:
+    device = await _load_device_or_404(device_id)
+    if not _is_tuya(device):
+        raise HTTPException(status_code=422, detail="Tuya commands are only available for Tuya LAN devices.")
+    values = payload.model_dump(exclude_none=True)
+    if not values:
+        raise HTTPException(status_code=400, detail="Provide at least one AC setting.")
+    try:
+        state = await tuya_service.set_values(device, values)
+    except tuya_service.TuyaServiceError as exc:
+        _raise_tuya_error(exc)
+    await db.save_last_state(device_id, _last_state_summary(state))
+    return DeviceState(
+        id=device.id,
+        name=device.name,
+        host=device.host,
+        channel=device.channel,
+        is_on=state["is_on"],
+        appliance=state.get("appliance"),
+        raw=state["raw"],
+    )
+
+
+@app.get("/devices/{device_id}/printer/diagnostics")
+async def get_printer_diagnostics(device_id: int, limit: int = 50) -> dict:
+    device = await _load_device_or_404(device_id)
+    if not _is_printer(device):
+        raise HTTPException(status_code=422, detail="Diagnostics are only available for printer devices.")
+    return {"deviceId": device_id, "events": await db.list_printer_diagnostics(device_id, limit)}
+
+
+@app.get("/devices/{device_id}/printer/capabilities")
+async def get_printer_capabilities(device_id: int) -> dict:
+    device = await _load_device_or_404(device_id)
+    if not _is_printer(device) or not printer_service._is_creality_k2(device):
+        raise HTTPException(status_code=422, detail="K2 capabilities are only available for Creality K2 printers.")
+    try:
+        state = await printer_service.get_status(device, checked_at=_now_iso())
+    except printer_service.PrinterServiceError:
+        cached = _cached_state(device) or {}
+        state = cached
+    return {
+        "deviceId": device_id,
+        "model": state.get("appliance", {}).get("model") or device.model,
+        "capabilities": state.get("appliance", {}).get("capabilities", printer_service.k2_capabilities()),
+    }
+
+
+@app.post("/devices/{device_id}/printer/diagnostics/ssh", response_model=DeviceOut)
+async def configure_printer_ssh_diagnostics(device_id: int, payload: PrinterSshDiagnosticsRequest) -> DeviceOut:
+    device = await _load_device_or_404(device_id)
+    if not _is_printer(device) or not printer_service._is_creality_k2(device):
+        raise HTTPException(status_code=422, detail="SSH restart diagnostics are only available for Creality K2 printers.")
+    settings = _printer_device_key_settings(device)
+    settings["ssh_diagnostics"] = payload.enabled
+    settings["ssh_username"] = payload.username
+    settings["ssh_port"] = payload.port
+    updated = await db.update_device(device_id, DeviceUpdate(device_key=json.dumps(settings)))
+    printer_service._k2_ssh_cache.pop(device_id, None)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    return _device_out(updated)
 
 
 @app.post("/devices/{device_id}/nest/command", response_model=DeviceActionResult)
@@ -1146,6 +1304,8 @@ async def create_ip_camera(payload: CameraCreateRequest) -> CameraOut:
         sub_url = camera_service.validate_stream_url(payload.sub_stream_url, payload.host) if payload.sub_stream_url else None
     except camera_service.CameraServiceError as exc:
         _camera_error(exc)
+    if await camera_db.get_camera_by_host(payload.host):
+        raise HTTPException(status_code=409, detail="A camera with this host or IP has already been added.")
     device = await db.create_device(DeviceCreate(
         name=payload.name, brand="ip-camera", model=payload.model, host=payload.host,
         device_type="camera,onvif,rtsp", channel=0, is_enabled=True,
@@ -1229,6 +1389,35 @@ async def get_onvif_profiles(payload: CameraOnvifProfilesRequest) -> dict:
         _camera_error(exc)
 
 
+@app.get("/api/cameras/{camera_id}/ptz")
+async def get_camera_ptz(camera_id: int) -> dict:
+    camera = await _camera_or_404(camera_id, secrets=True)
+    try:
+        return await camera_service.ptz_capabilities(camera)
+    except camera_service.CameraServiceError as exc:
+        _camera_error(exc)
+
+
+@app.post("/api/cameras/{camera_id}/ptz/move")
+async def move_camera_ptz(camera_id: int, payload: CameraPtzMoveRequest) -> dict:
+    camera = await _camera_or_404(camera_id, secrets=True)
+    try:
+        await camera_service.ptz_move(camera, payload.pan, payload.tilt, payload.zoom)
+    except camera_service.CameraServiceError as exc:
+        _camera_error(exc)
+    return {"ok": True}
+
+
+@app.post("/api/cameras/{camera_id}/ptz/stop")
+async def stop_camera_ptz(camera_id: int) -> dict:
+    camera = await _camera_or_404(camera_id, secrets=True)
+    try:
+        await camera_service.ptz_stop(camera)
+    except camera_service.CameraServiceError as exc:
+        _camera_error(exc)
+    return {"ok": True}
+
+
 @app.post("/api/cameras/{camera_id}/test")
 async def test_ip_camera(camera_id: int) -> dict:
     camera = await _camera_or_404(camera_id, secrets=True)
@@ -1272,9 +1461,19 @@ async def get_ip_camera_live_file(camera_id: int, filename: str) -> FileResponse
         if not path.exists():
             raise HTTPException(status_code=404, detail="Live segment not found.")
         media_type = "application/vnd.apple.mpegurl" if path.suffix == ".m3u8" else "video/mp2t"
-        return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-store"})
+        # HLS rotates segment files continuously. Reading while still inside the
+        # guarded request avoids a FileResponse stat/open race after this
+        # function returns, which otherwise surfaces as a generic HTTP 500.
+        try:
+            body = path.read_bytes()
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Live segment rotated; retry the playlist.")
+        return Response(content=body, media_type=media_type, headers={"Cache-Control": "no-store"})
     except camera_service.CameraServiceError as exc:
         _camera_error(exc)
+    except Exception as exc:
+        logger.exception("Live stream response failed for camera %s", camera_id)
+        raise HTTPException(status_code=502, detail="Live stream response failed.")
 
 
 @app.post("/api/cameras/{camera_id}/live/restart")
@@ -1421,6 +1620,18 @@ async def import_meross_cloud_devices(payload: MerossCloudImportRequest) -> Mero
     except Exception as exc:
         logger.exception("Meross cloud import failed.")
         raise HTTPException(status_code=502, detail=f"Meross cloud import failed: {exc}")
+
+
+@app.post("/setup/smartlife-smarthome/import", response_model=WankeziImportResponse)
+async def import_smartlife_smarthome_devices(payload: WankeziImportRequest) -> WankeziImportResponse:
+    try:
+        return await wankezi_import.import_devices(payload)
+    except wankezi_import.WankeziImportError as exc:
+        logger.warning("SmartLife-SmartHome import rejected: %s", exc)
+        raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:
+        logger.exception("SmartLife-SmartHome import failed.")
+        raise HTTPException(status_code=502, detail=f"SmartLife-SmartHome import failed: {exc}")
 
 
 @app.post("/setup/smartthings/import", response_model=SmartThingsImportResponse)

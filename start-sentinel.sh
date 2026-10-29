@@ -82,4 +82,4 @@ if command -v open >/dev/null 2>&1; then
   (sleep 2 && open "$DASHBOARD_URL") >/dev/null 2>&1 &
 fi
 
-exec python -m uvicorn app.main:app --host "$HOST" --port "$PORT" "${UVICORN_SSL_ARGS[@]}"
+exec python -m app.server --host "$HOST" --port "$PORT" "${UVICORN_SSL_ARGS[@]}"

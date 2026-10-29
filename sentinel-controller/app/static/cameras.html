@@ -5,31 +5,42 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sentinel Cameras</title>
   <link rel="icon" href="/brand/sentinel-mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/cameras.css?v=20260722-recording-timeline">
+  <link rel="stylesheet" href="/static/cameras.css?v=20260921-camera-stretch">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
-  <script src="/static/cameras.js?v=20260722-recording-timeline" defer></script>
+  <script src="/static/cameras.js?v=20260921-camera-stretch" defer></script>
+  <script src="/static/system.js?v=20260908" defer></script>
 </head>
 <body>
   <header class="nvr-header">
     <a class="brand" href="/dashboard"><img src="/brand/sentinel-mark.svg" alt=""><span>Sentinel</span></a>
     <div><p>Local surveillance</p><h1>Cameras &amp; NVR</h1></div>
-    <nav><a href="/dashboard">Dashboard</a><button id="storageButton">Storage</button><button id="addButton" class="primary">Add camera</button></nav>
+    <nav><a href="/dashboard">Dashboard</a><button id="storageButton">Storage</button><button id="addButton" class="primary">Add camera</button><button id="restartSentinelButton" type="button">Restart Sentinel</button></nav>
   </header>
   <main>
+    <p id="restartSentinelStatus" role="status" aria-live="polite"></p>
     <section class="health-strip" aria-live="polite">
       <div><span>Recorder</span><strong id="recorderStatus">Checking…</strong></div>
       <div><span>Storage</span><strong id="storageStatus">—</strong></div>
       <div><span>Cameras</span><strong id="cameraCount">0</strong></div>
     </section>
     <div id="banner" class="banner" hidden></div>
-    <section>
-      <div class="section-heading"><div><p class="eyebrow">Live</p><h2 id="liveViewTitle">Camera grid</h2></div><div class="view-controls" role="group" aria-label="Camera layout"><button id="cardViewButton" type="button" aria-pressed="true">Cards</button><button id="splitViewButton" type="button" aria-pressed="false">4-up</button><button id="refreshButton" type="button">Refresh</button></div></div>
+    <section id="liveSection">
+      <div class="section-heading"><div><p class="eyebrow">Live</p><h2 id="liveViewTitle">Camera grid</h2></div><div class="view-controls" role="group" aria-label="Camera layout"><button id="wallViewButton" type="button" aria-pressed="true">Camera wall</button><button id="cardViewButton" type="button" aria-pressed="false">Cards</button><button id="splitViewButton" type="button" aria-pressed="false">4-up</button><button id="stretchViewButton" type="button" aria-pressed="false" title="Stretch feeds to fill each camera box">Stretch</button><button id="fullscreenButton" type="button">Fullscreen</button><button id="refreshButton" type="button">Refresh</button></div></div>
       <div id="cameraGrid" class="camera-grid"></div>
       <div id="emptyState" class="empty-state" hidden><h3>No cameras yet</h3><p>Discover an ONVIF camera or add its RTSP stream manually.</p><button id="emptyAddButton" class="primary">Add camera</button></div>
     </section>
     <section id="playbackSection" class="playback-section" hidden>
       <div class="section-heading"><div><p class="eyebrow">Review</p><h2 id="playbackTitle">Timeline</h2><div id="playbackLiveStatus" class="detail-live-clock" data-live-label="LIVE NOW" hidden></div></div><button id="jumpLiveButton">Jump to live</button></div>
       <div class="player-shell"><video id="player" class="playback-active" controls playsinline muted preload="auto"></video><video id="playerBuffer" controls playsinline muted preload="auto" aria-hidden="true"></video><div id="playerMessage">Select a recording from the timeline.</div></div>
+      <div id="ptzControls" class="ptz-controls" hidden>
+        <div class="ptz-heading"><strong>PTZ controls</strong><span id="ptzStatus" role="status" aria-live="polite">Ready</span></div>
+        <div class="ptz-pad" aria-label="Pan and tilt controls">
+          <button type="button" data-ptz-pan="-0.7" data-ptz-tilt="0.7" aria-label="Move up and left">↖</button><button type="button" data-ptz-pan="0" data-ptz-tilt="0.7" aria-label="Move up">↑</button><button type="button" data-ptz-pan="0.7" data-ptz-tilt="0.7" aria-label="Move up and right">↗</button>
+          <button type="button" data-ptz-pan="-0.7" data-ptz-tilt="0" aria-label="Move left">←</button><button type="button" id="ptzStopButton" aria-label="Stop movement">■</button><button type="button" data-ptz-pan="0.7" data-ptz-tilt="0" aria-label="Move right">→</button>
+          <button type="button" data-ptz-pan="-0.7" data-ptz-tilt="-0.7" aria-label="Move down and left">↙</button><button type="button" data-ptz-pan="0" data-ptz-tilt="-0.7" aria-label="Move down">↓</button><button type="button" data-ptz-pan="0.7" data-ptz-tilt="-0.7" aria-label="Move down and right">↘</button>
+        </div>
+        <div class="ptz-zoom"><span>Zoom</span><button type="button" data-ptz-zoom="-0.7" aria-label="Zoom out">−</button><button type="button" data-ptz-zoom="0.7" aria-label="Zoom in">+</button></div>
+      </div>
       <div class="timeline-toolbar"><label>Date <input id="timelineDate" type="date"></label><span id="timelineSummary"></span></div>
       <div id="timeline" class="timeline" role="region" aria-label="Recording timeline"></div>
     </section>
@@ -38,15 +49,25 @@
   <dialog id="cameraDialog">
     <form id="cameraForm">
       <header><div><p class="eyebrow">ONVIF / RTSP</p><h2>Add IP camera</h2></div><button type="button" class="close" data-close="cameraDialog">×</button></header>
-      <div class="discover-row"><button id="discoverButton" type="button">Discover cameras</button><select id="discoveredCameras"><option value="">Discovered cameras appear here</option></select></div>
+      <div class="discover-row"><button id="discoverButton" type="button">Discover cameras</button><span>Find cameras on the selected networks, then check only the new ones you want to add.</span></div>
       <label>VPN/VLAN subnet <small>Optional. Sentinel automatically scans private subnets found in this computer's routing table.</small><input id="discoverySubnet" placeholder="Example: 10.1.1.0/24"></label>
+      <p class="credentials-heading"><strong>Camera credentials</strong><small>Enter once; these are used to load profiles for every selected camera and for manual setup.</small></p>
+      <div class="form-grid">
+        <label>Username<input id="cameraUsername" autocomplete="username"></label>
+        <label>Password<input id="cameraPassword" type="password" autocomplete="current-password"></label>
+      </div>
+      <section id="discoveredCameraPanel" class="discovered-camera-panel" hidden aria-labelledby="discoveredCameraHeading">
+        <div class="discovered-camera-heading"><div><strong id="discoveredCameraHeading">Discovered cameras</strong><small id="discoveredCameraSummary"></small></div><label><input id="selectAllDiscovered" type="checkbox"> Select all new</label></div>
+        <div id="discoveredCameraList" class="discovered-camera-list"></div>
+        <button id="addSelectedCamerasButton" class="primary" type="button" disabled>Add selected cameras</button>
+        <p id="batchCameraStatus" class="batch-camera-status" role="status" aria-live="polite"></p>
+      </section>
+      <div class="manual-camera-divider"><span>Or add one camera manually</span></div>
       <div class="form-grid">
         <label>Name<input id="cameraName" required maxlength="120" placeholder="Driveway"></label>
         <label>Host or IP<input id="cameraHost" required placeholder="192.168.1.50"></label>
         <label>Model<input id="cameraModel" placeholder="Optional"></label>
         <label>ONVIF port<input id="onvifPort" type="number" value="80" min="1" max="65535"></label>
-        <label>Username<input id="cameraUsername" autocomplete="username"></label>
-        <label>Password<input id="cameraPassword" type="password" autocomplete="current-password"></label>
       </div>
       <button id="loadProfilesButton" type="button">Load ONVIF stream profiles</button>
       <div class="form-grid streams">
